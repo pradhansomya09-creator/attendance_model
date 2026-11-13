@@ -447,4 +447,31 @@ describe("overlayGuidance", () => {
       isLowLight: undefined,
     })
   })
+
+  it("returns null for confirmed live unknown faces so renderer can show red UNKNOWN PERSON badge", () => {
+    const face = baseFace({
+      track_id: 11,
+      liveness: {
+        is_real: true,
+        status: "real",
+      },
+    })
+
+    expect(
+      getOverlayGuidance(face, {
+        enableSpoofDetection: true,
+        recognitionEnabled: true,
+        recognitionResult: {
+          success: false,
+          person_id: null,
+          name: null,
+          similarity: 0.12,
+          processing_time: 0,
+          error: null,
+        },
+        holdStillActive: false,
+        verifyingHintActive: false,
+      }),
+    ).toBeNull()
+  })
 })

@@ -8,9 +8,22 @@ import { ErrorMessage, FormInput, Modal, Spinner } from "@/components/common"
 import { useGroupUIStore, useGroupStore } from "@/components/group/stores"
 import { useAttendanceStore } from "@/components/main/stores"
 import { useCamera } from "@/components/group/sections/enrollment/hooks/useCamera"
+import { useLiveFaceAlignment } from "@/components/group/sections/enrollment/hooks/useLiveFaceAlignment"
+import { FaceAlignmentOverlay } from "@/components/group/sections/enrollment/components/FaceAlignmentOverlay"
+import { AngleProgressStrip } from "@/components/group/sections/enrollment/components/AngleProgressStrip"
+import {
+  areAllRequiredAnglesCollected,
+  ENROLLMENT_ANGLE_STEPS,
+  getCollectedAngleCount,
+  getNextMissingAngle,
+  isValidCapturedFrame,
+  type EnrollmentAngleKey,
+} from "@/components/group/sections/enrollment/enrollmentAngles"
+import type { CapturedFrame } from "@/components/group/sections/enrollment/types"
 import { Tooltip, InfoPopover } from "@/components/shared"
 import { validateAndGetBestFace } from "@/utils/faceValidation"
 import { dataUrlToBlob } from "@/utils/dataUrl"
+import { makeId } from "@/utils/imageHelpers"
 import {
   createBulkMemberCheckpoint,
   reconcileBulkMemberRows,
@@ -32,13 +45,6 @@ interface AddMemberProps {
   onClose: () => void
   /** Callback function when a member is successfully added */
   onSuccess: () => void
-}
-
-interface CapturedFaceData {
-  dataUrl: string
-  bbox: number[]
-  landmarks_5: number[][]
-  confidence: number
 }
 
 const waitForNextPaint = () =>
@@ -93,9 +99,10 @@ export function AddMember({
   const [error, setError] = useState<string | null>(null)
   const [confirmDuplicate, setConfirmDuplicate] = useState(false)
 
-  // Inline Face Enrollment states
+  // Inline Multi-Angle Face Enrollment states
   const [isFaceSectionOpen, setIsFaceSectionOpen] = useState(false)
-  const [capturedFace, setCapturedFace] = useState<CapturedFaceData | null>(null)
+  const [capturedFrames, setCapturedFrames] = useState<CapturedFrame[]>([])
+  const [currentAngle, setCurrentAngle] = useState<EnrollmentAngleKey>("front")
   const [faceInputMode, setFaceInputMode] = useState<"camera" | "upload">("camera")
   const [isProcessingFace, setIsProcessingFace] = useState(false)
   const [faceError, setFaceError] = useState<string | null>(null)
@@ -121,15 +128,27 @@ export function AddMember({
     },
     [videoRef],
   )
+  const allAnglesCollected = useMemo(
+    () => areAllRequiredAnglesCollected(capturedFrames),
+    [capturedFrames],
+  )
+  const completedAngles = useMemo(
+    () =>
+      capturedFrames
+        .filter((f) => isValidCapturedFrame(f) && f.angle)
+        .map((f) => f.angle as EnrollmentAngleKey),
+    [capturedFrames],
+  )
   const needsCamera =
-    isOpen && !isBulkMode && isFaceSectionOpen && faceInputMode === "camera" && !capturedFace
-  const needsFacePhoto = isFaceSectionOpen && !capturedFace
+    isOpen && !isBulkMode && isFaceSectionOpen && faceInputMode === "camera" && !allAnglesCollected
+  const needsFacePhoto = isFaceSectionOpen && !allAnglesCollected
 
   const skipFaceEnrollment = useCallback(() => {
     faceRequestRef.current += 1
     stopCamera()
     setIsProcessingFace(false)
-    setCapturedFace(null)
+    setCapturedFrames([])
+    setCurrentAngle("front")
     setFaceError(null)
     setIsFaceSectionOpen(false)
   }, [stopCamera])
@@ -209,98 +228,166 @@ export function AddMember({
     }
   }, [isOpen, group.id, initialMode, resetForm])
 
-  const handleSnapPhoto = useCallback(async () => {
-    const video = videoRef.current
-    if (!video || !video.videoWidth || !video.videoHeight) {
-      setFaceError("Camera is not ready yet.")
-      return
-    }
+  const handleSnapPhotoForAngle = useCallback(
+    async (targetAngleOverride?: EnrollmentAngleKey) => {
+      const video = videoRef.current
+      if (!video || !video.videoWidth || !video.videoHeight) {
+        setFaceError("Camera stream interrupted or not ready. Please wait or retry camera.")
+        return
+      }
 
-    const requestId = ++faceRequestRef.current
-    try {
-      setIsProcessingFace(true)
-      setFaceError(null)
+      const angleToCapture = targetAngleOverride || currentAngle
+      const requestId = ++faceRequestRef.current
+      try {
+        setIsProcessingFace(true)
+        setFaceError(null)
 
-      const canvas = document.createElement("canvas")
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-      const ctx = canvas.getContext("2d")
-      if (!ctx) throw new Error("Could not initialize image canvas.")
+        const canvas = document.createElement("canvas")
+        canvas.width = video.videoWidth
+        canvas.height = video.videoHeight
+        const ctx = canvas.getContext("2d")
+        if (!ctx) throw new Error("Could not initialize image canvas.")
 
-      ctx.translate(canvas.width, 0)
-      ctx.scale(-1, 1)
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+        ctx.translate(canvas.width, 0)
+        ctx.scale(-1, 1)
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
 
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.95)
-      const blob = dataUrlToBlob(dataUrl)
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.95)
+        const blob = dataUrlToBlob(dataUrl)
 
-      const detection = await backendService.detectFaces(blob, {
-        model_type: "face_detector",
-        enableLiveness: false,
-      })
+        const detection = await backendService.detectFaces(blob, {
+          model_type: "face_detector",
+          enableLiveness: false,
+          includeAlignment: true,
+          targetAngle: angleToCapture,
+          mirrored: false,
+        })
 
-      if (requestId !== faceRequestRef.current) return
-      const bestFace = validateAndGetBestFace(detection)
+        if (requestId !== faceRequestRef.current) return
+        const bestFace = validateAndGetBestFace(detection)
+        if (detection.alignment && !detection.alignment.ready) {
+          throw new Error(
+            detection.alignment.guidance ||
+              `Please align your face clearly for ${angleToCapture.replace("_", " ")}.`,
+          )
+        }
 
-      setCapturedFace({
-        dataUrl,
-        bbox: bestFace.bbox,
-        landmarks_5: bestFace.landmarks_5,
-        confidence: bestFace.confidence,
-      })
-      stopCamera()
-    } catch (err) {
-      if (requestId !== faceRequestRef.current) return
-      const msg =
-        err instanceof Error ?
-          err.message
-        : "Could not detect a clear face. Try a front-facing photo with even lighting."
-      setFaceError(msg)
-    } finally {
-      if (requestId === faceRequestRef.current) setIsProcessingFace(false)
-    }
-  }, [videoRef, stopCamera])
+        const nextFrame: CapturedFrame = {
+          id: makeId(),
+          angle: angleToCapture,
+          label: angleToCapture,
+          dataUrl,
+          width: canvas.width,
+          height: canvas.height,
+          bbox: bestFace.bbox,
+          landmarks_5: bestFace.landmarks_5,
+          confidence: bestFace.confidence,
+          status: "ready",
+        }
+        const nextList = [
+          ...capturedFrames.filter((f) => f.angle !== angleToCapture),
+          nextFrame,
+        ]
+        setCapturedFrames(nextList)
+        if (areAllRequiredAnglesCollected(nextList)) {
+          stopCamera()
+        } else {
+          setCurrentAngle(getNextMissingAngle(nextList, angleToCapture))
+        }
+      } catch (err) {
+        if (requestId !== faceRequestRef.current) return
+        const msg =
+          err instanceof Error ?
+            err.message
+          : "Could not detect a clear face. Try again with even lighting."
+        setFaceError(msg)
+      } finally {
+        if (requestId === faceRequestRef.current) setIsProcessingFace(false)
+      }
+    },
+    [videoRef, currentAngle, capturedFrames, stopCamera],
+  )
 
-  const handleProcessUploadedFile = useCallback(async (file: File) => {
-    const requestId = ++faceRequestRef.current
-    try {
-      setIsProcessingFace(true)
-      setFaceError(null)
+  const handleSnapPhoto = useCallback(() => {
+    void handleSnapPhotoForAngle()
+  }, [handleSnapPhotoForAngle])
 
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = (e) => resolve(e.target?.result as string)
-        reader.onerror = () => reject(new Error("Failed to read image file."))
-        reader.readAsDataURL(file)
-      })
+  const { alignment: liveAlignment } = useLiveFaceAlignment({
+    videoRef,
+    isActive: needsCamera && Boolean(cameraVideo) && isStreaming && isVideoReady && !cameraError,
+    targetAngle: currentAngle,
+    mirrored: true,
+    autoCaptureEnabled: false,
+    autoCapturePaused: isProcessingFace || loading,
+  })
 
-      if (requestId !== faceRequestRef.current) return
-      const blob = dataUrlToBlob(dataUrl)
-      const detection = await backendService.detectFaces(blob, {
-        model_type: "face_detector",
-        enableLiveness: false,
-      })
+  const handleProcessUploadedFile = useCallback(
+    async (file: File) => {
+      const angleToCapture = currentAngle
+      const requestId = ++faceRequestRef.current
+      try {
+        setIsProcessingFace(true)
+        setFaceError(null)
 
-      if (requestId !== faceRequestRef.current) return
-      const bestFace = validateAndGetBestFace(detection)
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = (e) => resolve(e.target?.result as string)
+          reader.onerror = () => reject(new Error("Failed to read image file."))
+          reader.readAsDataURL(file)
+        })
 
-      setCapturedFace({
-        dataUrl,
-        bbox: bestFace.bbox,
-        landmarks_5: bestFace.landmarks_5,
-        confidence: bestFace.confidence,
-      })
-    } catch (err) {
-      if (requestId !== faceRequestRef.current) return
-      const msg =
-        err instanceof Error ?
-          err.message
-        : "Could not detect a clear face. Try a front-facing photo with even lighting."
-      setFaceError(msg)
-    } finally {
-      if (requestId === faceRequestRef.current) setIsProcessingFace(false)
-    }
-  }, [])
+        if (requestId !== faceRequestRef.current) return
+        const blob = dataUrlToBlob(dataUrl)
+        const detection = await backendService.detectFaces(blob, {
+          model_type: "face_detector",
+          enableLiveness: false,
+          includeAlignment: true,
+          targetAngle: angleToCapture,
+          mirrored: false,
+        })
+
+        if (requestId !== faceRequestRef.current) return
+        const bestFace = validateAndGetBestFace(detection)
+        if (detection.alignment && !detection.alignment.ready) {
+          throw new Error(
+            detection.alignment.guidance ||
+              `Uploaded image does not meet alignment/quality criteria for ${angleToCapture.replace("_", " ")}.`,
+          )
+        }
+
+        const nextFrame: CapturedFrame = {
+          id: makeId(),
+          angle: angleToCapture,
+          label: angleToCapture,
+          dataUrl,
+          width: 640,
+          height: 480,
+          bbox: bestFace.bbox,
+          landmarks_5: bestFace.landmarks_5,
+          confidence: bestFace.confidence,
+          status: "ready",
+        }
+        const nextList = [
+          ...capturedFrames.filter((f) => f.angle !== angleToCapture),
+          nextFrame,
+        ]
+        setCapturedFrames(nextList)
+        if (!areAllRequiredAnglesCollected(nextList)) {
+          setCurrentAngle(getNextMissingAngle(nextList, angleToCapture))
+        }
+      } catch (err) {
+        if (requestId !== faceRequestRef.current) return
+        const msg =
+          err instanceof Error ?
+            err.message
+          : "Could not detect a clear face. Try a clearer photo with even lighting."
+        setFaceError(msg)
+      } finally {
+        if (requestId === faceRequestRef.current) setIsProcessingFace(false)
+      }
+    },
+    [currentAngle, capturedFrames],
+  )
 
   useEffect(() => {
     if (!isBulkMode && nameInputRef.current) {
@@ -412,20 +499,39 @@ export function AddMember({
       updateMemberStores(newMember)
 
       let faceEnrolled = false
-      if (capturedFace) {
+      if (allAnglesCollected) {
         let enrollmentError: string | null = null
         try {
-          const res = await attendanceManager.enrollFaceForGroupPerson(
+          const orderedCaptures = ENROLLMENT_ANGLE_STEPS.map((step) =>
+            capturedFrames.find((f) => f.angle === step.angle && isValidCapturedFrame(f)),
+          )
+            .filter((f): f is CapturedFrame => Boolean(f))
+            .map((frame) => ({
+              angle: frame.angle as string,
+              imageData: frame.dataUrl,
+              bbox: frame.bbox as number[],
+              landmarks_5: frame.landmarks_5 as number[][],
+              mirrored: false,
+            }))
+
+          if (orderedCaptures.length < ENROLLMENT_ANGLE_STEPS.length) {
+            throw new Error(
+              `At least 5 distinct face angles are required (${orderedCaptures.length}/5 captured).`,
+            )
+          }
+
+          const res = await attendanceManager.enrollFaceMultiAngle(
             group.id,
             newMember.person_id,
-            capturedFace.dataUrl,
-            capturedFace.bbox,
-            capturedFace.landmarks_5,
+            orderedCaptures,
+            { mirrored: false },
           )
           if (!isCurrentForm()) return
           if (res.success) {
             faceEnrolled = true
             newMember = { ...newMember, has_face_data: true }
+            // Discard temporary camera image data URLs immediately after enrollment
+            setCapturedFrames([])
           } else
             enrollmentError = res.error || res.message || "Face enrollment could not be completed."
         } catch (faceErr) {
@@ -451,7 +557,8 @@ export function AddMember({
         setNewMemberRole("")
         setSavedMember(null)
         creationRequestRef.current = null
-        setCapturedFace(null)
+        setCapturedFrames([])
+        setCurrentAngle("front")
         setFaceError(null)
         setConfirmDuplicate(false)
         setError(null)
@@ -790,45 +897,58 @@ export function AddMember({
                   </div>
                 </div>
 
-                {/* Inline Face Enrollment Section */}
+                {/* Inline Multi-Angle Face Enrollment Section */}
                 <div className="overflow-hidden">
                   <AnimatePresence mode="wait" initial={false}>
-                    {capturedFace ?
+                    {allAnglesCollected ?
                       <motion.div
                         key="captured"
                         initial={{ opacity: 0, y: -6, height: 0 }}
                         animate={{ opacity: 1, y: 0, height: "auto" }}
                         exit={{ opacity: 0, y: -6, height: 0 }}
                         transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                        className="flex items-center gap-3 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-2.5">
-                        <img
-                          src={capturedFace.dataUrl}
-                          alt="Captured face preview"
-                          className="h-9 w-9 rounded-full border border-cyan-500/30 object-cover"
-                        />
-                        <div className="min-w-0 flex-1">
-                          <div className="text-[11px] font-medium text-cyan-300">Photo ready</div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            disabled={loading}
-                            onClick={() => {
-                              setCapturedFace(null)
-                              setFaceError(null)
-                              setIsFaceSectionOpen(true)
-                              setFaceInputMode("camera")
-                            }}
-                            className="rounded px-2.5 py-1 text-[11px] font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white">
-                            Retake
-                          </button>
-                          <button
-                            type="button"
-                            disabled={loading}
-                            onClick={skipFaceEnrollment}
-                            className="rounded px-2.5 py-1 text-[11px] font-medium text-red-400/80 transition-colors hover:bg-red-500/10 hover:text-red-300">
-                            Remove
-                          </button>
+                        className="space-y-2 rounded-xl border border-cyan-500/20 bg-cyan-500/5 p-2.5">
+                        <div className="flex items-center gap-3">
+                          <div className="flex -space-x-1.5">
+                            {ENROLLMENT_ANGLE_STEPS.map((step) => {
+                              const frame = capturedFrames.find((f) => f.angle === step.angle)
+                              return frame?.dataUrl ? (
+                                <img
+                                  key={step.angle}
+                                  src={frame.dataUrl}
+                                  alt={step.label}
+                                  className="h-8 w-8 rounded-full border border-cyan-400/50 object-cover"
+                                />
+                              ) : null
+                            })}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] font-medium text-cyan-300">
+                              5/5 face angles ready
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={() => {
+                                setCapturedFrames([])
+                                setCurrentAngle("front")
+                                setFaceError(null)
+                                setIsFaceSectionOpen(true)
+                                setFaceInputMode("camera")
+                              }}
+                              className="rounded px-2.5 py-1 text-[11px] font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white">
+                              Retake
+                            </button>
+                            <button
+                              type="button"
+                              disabled={loading}
+                              onClick={skipFaceEnrollment}
+                              className="rounded px-2.5 py-1 text-[11px] font-medium text-red-400/80 transition-colors hover:bg-red-500/10 hover:text-red-300">
+                              Remove
+                            </button>
+                          </div>
                         </div>
                       </motion.div>
                     : !isFaceSectionOpen ?
@@ -951,7 +1071,7 @@ export function AddMember({
                                 animate={{ opacity: 1, scale: 1 }}
                                 exit={{ opacity: 0, scale: 0.98 }}
                                 transition={{ duration: 0.18, ease: "easeOut" }}
-                                className="relative flex h-52 w-full flex-col items-center justify-between overflow-hidden rounded-xl border border-white/10 bg-black/60 p-2.5">
+                                className="relative flex h-64 w-full flex-col items-center justify-between overflow-hidden rounded-xl border border-white/10 bg-black/60 p-2.5">
                                 <video
                                   ref={attachCameraVideo}
                                   className={`absolute inset-0 h-full w-full scale-x-[-1] object-cover transition-opacity duration-300 ${
@@ -962,6 +1082,18 @@ export function AddMember({
                                   playsInline
                                   muted
                                 />
+
+                                {isStreaming && isVideoReady && (
+                                  <FaceAlignmentOverlay
+                                    alignment={liveAlignment}
+                                    currentAngle={currentAngle}
+                                    completedAngles={completedAngles}
+                                    videoWidth={videoRef.current?.videoWidth || 640}
+                                    videoHeight={videoRef.current?.videoHeight || 480}
+                                    objectMode="cover"
+                                    compact={true}
+                                  />
+                                )}
 
                                 {/* Top spacer */}
                                 <div className="z-10 h-1 w-full" />
@@ -1069,10 +1201,10 @@ export function AddMember({
                                       <span className="truncate text-[11px] font-medium text-white/80">
                                         {isProcessingFace ?
                                           "Analyzing face…"
-                                        : "Click or drop photo"}
+                                        : `Upload: ${ENROLLMENT_ANGLE_STEPS.find((s) => s.angle === currentAngle)?.label || "Front"}`}
                                       </span>
                                       <span className="text-[10px] text-white/40">
-                                        JPG, PNG up to 10MB
+                                        JPG, PNG up to 10MB ({completedAngles.length}/5 angles collected)
                                       </span>
                                     </div>
                                   </div>
@@ -1095,11 +1227,24 @@ export function AddMember({
                             }
                           </AnimatePresence>
 
+                          <AngleProgressStrip
+                            frames={capturedFrames}
+                            activeAngle={currentAngle}
+                            onSelectAngle={setCurrentAngle}
+                            onRetakeAngle={(angle) => {
+                              setCapturedFrames((prev) => prev.filter((f) => f.angle !== angle))
+                              setCurrentAngle(angle)
+                              setFaceError(null)
+                            }}
+                            disabled={isProcessingFace || loading}
+                            compact={true}
+                          />
+
                           <div className="flex flex-wrap items-center justify-between gap-2 px-0.5">
                             <p id={faceHintId} className="text-[11px] text-white/50">
                               {isProcessingFace ?
-                                "Checking your photo before enrollment."
-                              : "Capture or upload a photo before adding this member."}
+                                "Checking angle clarity & landmarks before saving."
+                              : `Capture or upload all 5 distinct face angles (${getCollectedAngleCount(capturedFrames)}/5 collected).`}
                             </p>
                             <button
                               type="button"
@@ -1264,18 +1409,18 @@ export function AddMember({
                   `Processing (${bulkProgress.current}/${bulkProgress.total})`
                 : "Processing…"
               : !isBulkMode && savedMember ?
-                capturedFace ?
+                allAnglesCollected ?
                   "Retry face enrollment"
                 : "Done"
               : confirmDuplicate && !isBulkMode ?
-                capturedFace ?
+                allAnglesCollected ?
                   "Add anyway & enroll face"
                 : "Add anyway"
               : isBulkMode ?
                 bulkHasAttempted ?
                   "Retry remaining entries"
                 : "Add members"
-              : capturedFace ?
+              : allAnglesCollected ?
                 "Add member & enroll face"
               : "Add member"}
             </button>

@@ -14,6 +14,7 @@ interface CameraFeedProps {
   cameraDevices: MediaDeviceInfo[]
   selectedCamera: string
   setSelectedCamera: (deviceId: string) => void
+  children?: React.ReactNode
 }
 
 export function CameraFeed({
@@ -26,6 +27,7 @@ export function CameraFeed({
   cameraDevices,
   selectedCamera,
   setSelectedCamera,
+  children,
 }: CameraFeedProps) {
   if (source !== "live") return null
 
@@ -37,6 +39,8 @@ export function CameraFeed({
         playsInline
         muted
       />
+
+      {children}
 
       {/* Compact Camera Selection Overlay (Only shown when multiple cameras exist) */}
       {cameraDevices.length > 1 && (

@@ -11,6 +11,15 @@ import { useDialog, Tooltip } from "@/components/shared"
 import { CameraFeed } from "@/components/group/sections/enrollment/components/CameraFeed"
 import { UploadArea } from "@/components/group/sections/enrollment/components/UploadArea"
 import { ResultView } from "@/components/group/sections/enrollment/components/ResultView"
+import { FaceAlignmentOverlay } from "@/components/group/sections/enrollment/components/FaceAlignmentOverlay"
+import { AngleProgressStrip } from "@/components/group/sections/enrollment/components/AngleProgressStrip"
+import { useLiveFaceAlignment } from "@/components/group/sections/enrollment/hooks/useLiveFaceAlignment"
+import {
+  areAllRequiredAnglesCollected,
+  ENROLLMENT_ANGLE_STEPS,
+  isValidCapturedFrame,
+  type EnrollmentAngleKey,
+} from "@/components/group/sections/enrollment/enrollmentAngles"
 import { useUIStore } from "@/components/main/stores"
 import { EnrollmentInfoModal } from "@/components/group/sections/enrollment/components/EnrollmentInfoModal"
 import type { CaptureSource } from "./types"
@@ -68,6 +77,8 @@ export function FaceCapture({
 
   const {
     frames,
+    currentAngle,
+    setCurrentAngle,
     isEnrolling,
     successMessage,
     globalError,
@@ -76,11 +87,68 @@ export function FaceCapture({
     captureProcessedFrame,
     handleEnroll,
     resetFrames,
+    removeAngleFrame,
   } = useFaceCapture(group, members, onRefresh, dialog)
 
-  const framesReady = frames.some((f) => f.status === "ready" || f.status === "enrolled")
+  const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true)
+  const framesReady = areAllRequiredAnglesCollected(frames)
+  const completedAngles = useMemo(
+    () =>
+      frames
+        .filter((f) => isValidCapturedFrame(f) && f.angle)
+        .map((f) => f.angle as EnrollmentAngleKey),
+    [frames],
+  )
   const isProcessing = frames.some((f) => f.status === "processing")
   const visibleError = globalError || (source === "live" ? cameraError : null)
+
+  const handleCaptureForAngle = useCallback(
+    (angleToCapture: EnrollmentAngleKey) => {
+      if (!videoRef.current || !selectedMemberId) return
+      if (!videoRef.current.videoWidth || !videoRef.current.videoHeight) {
+        setGlobalError("Camera stream interrupted or not ready. Please check your camera.")
+        return
+      }
+      const canvas = document.createElement("canvas")
+      canvas.width = videoRef.current.videoWidth
+      canvas.height = videoRef.current.videoHeight
+      const ctx = canvas.getContext("2d")
+      if (!ctx) return
+
+      // Flip the capture to match the mirrored video preview
+      ctx.translate(canvas.width, 0)
+      ctx.scale(-1, 1)
+
+      ctx.drawImage(videoRef.current, 0, 0)
+      const url = canvas.toDataURL("image/jpeg", 0.95)
+      void captureProcessedFrame(angleToCapture, url, canvas.width, canvas.height)
+    },
+    [videoRef, selectedMemberId, captureProcessedFrame, setGlobalError],
+  )
+
+  const handleCaptureFromCamera = useCallback(() => {
+    handleCaptureForAngle(currentAngle)
+  }, [handleCaptureForAngle, currentAngle])
+
+  const liveAlignmentActive =
+    source === "live" &&
+    Boolean(selectedMemberId) &&
+    !showInfoModal &&
+    isStreaming &&
+    isVideoReady &&
+    !framesReady &&
+    !successMessage &&
+    !cameraError
+
+  const { alignment } = useLiveFaceAlignment({
+    videoRef,
+    isActive: liveAlignmentActive,
+    targetAngle: currentAngle,
+    mirrored: true,
+    autoCaptureEnabled,
+    autoCapturePaused: isProcessing || isEnrolling,
+    onAutoCaptureReady: handleCaptureForAngle,
+  })
 
   useEffect(() => {
     if (source !== "live" || !selectedMemberId || showInfoModal || framesReady || successMessage) {
@@ -169,23 +237,6 @@ export function FaceCapture({
     return () => clearTimeout(timer)
   }, [successCountdown, setSuccessMessage, setSelectedMemberId, resetFrames, resetEnrollment])
 
-  const handleCaptureFromCamera = useCallback(() => {
-    if (!videoRef.current || !selectedMemberId) return
-    const canvas = document.createElement("canvas")
-    canvas.width = videoRef.current.videoWidth
-    canvas.height = videoRef.current.videoHeight
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return
-
-    // Flip the capture to match the mirrored video preview
-    ctx.translate(canvas.width, 0)
-    ctx.scale(-1, 1)
-
-    ctx.drawImage(videoRef.current, 0, 0)
-    const url = canvas.toDataURL("image/jpeg", 0.95)
-    captureProcessedFrame("Front", url, canvas.width, canvas.height)
-  }, [videoRef, selectedMemberId, captureProcessedFrame])
-
   const handleWrapperEnroll = useCallback(async () => {
     if (!selectedMemberId) return
     await handleEnroll(selectedMemberId, async () => {}, memberStatus)
@@ -197,6 +248,16 @@ export function FaceCapture({
       startCamera()
     }
   }, [resetFrames, source, startCamera, showInfoModal])
+
+  const handleRetakeSingleAngle = useCallback(
+    (angle: EnrollmentAngleKey) => {
+      removeAngleFrame(angle)
+      if (source === "live" && !showInfoModal && !isStreaming) {
+        startCamera()
+      }
+    },
+    [removeAngleFrame, source, showInfoModal, isStreaming, startCamera],
+  )
 
   const handleConfirmInfoModal = useCallback(() => {
     if (dontShowAgainChecked) {
@@ -328,17 +389,38 @@ export function FaceCapture({
               exit={{ opacity: 0, scale: 0.96 }}
               transition={{ duration: 0.22, ease: "easeOut" }}
               className="absolute inset-0 flex flex-col items-center justify-center gap-4 overflow-hidden p-6">
-              <div className="relative aspect-video min-h-0 w-full max-w-4xl shrink overflow-hidden rounded-xl">
-                {/* Floating Header Overlay */}
-                <div className="pointer-events-none absolute top-0 right-0 left-0 z-20 flex flex-col items-start bg-gradient-to-b from-black/80 via-black/40 to-transparent px-8 pt-6 pb-12">
-                  <span className="mb-0.5 text-[10px] font-bold tracking-[0.15em] text-cyan-400/80 uppercase">
+              <div className="flex w-full max-w-4xl items-center justify-between px-1">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[10px] font-bold tracking-[0.15em] text-cyan-400/80 uppercase">
                     Member
                   </span>
-                  <h2 className="w-full max-w-[60%] truncate text-xl font-bold tracking-tight text-white sm:max-w-[70%] sm:text-2xl">
+                  <h2 className="truncate text-base font-bold tracking-tight text-white sm:text-lg">
                     {selectedMemberName}
                   </h2>
                 </div>
+                <div className="flex items-center gap-3 text-[11px] font-medium text-white/65">
+                  <span>
+                    Angle{" "}
+                    <strong className="text-cyan-300">
+                      {completedAngles.length}/{ENROLLMENT_ANGLE_STEPS.length}
+                    </strong>{" "}
+                    collected
+                  </span>
+                  {source === "live" && !framesReady && (
+                    <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-white/65">
+                      <input
+                        type="checkbox"
+                        checked={autoCaptureEnabled}
+                        onChange={(e) => setAutoCaptureEnabled(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-white/20 bg-transparent accent-cyan-500"
+                      />
+                      Auto-capture
+                    </label>
+                  )}
+                </div>
+              </div>
 
+              <div className="relative aspect-video min-h-0 w-full max-w-4xl shrink overflow-hidden rounded-xl border border-white/10">
                 {!framesReady ?
                   source === "live" ?
                     <CameraFeed
@@ -350,11 +432,23 @@ export function FaceCapture({
                       source={source}
                       cameraDevices={cameraDevices}
                       selectedCamera={selectedCamera}
-                      setSelectedCamera={setSelectedCamera}
-                    />
+                      setSelectedCamera={setSelectedCamera}>
+                      {isStreaming && isVideoReady && (
+                        <FaceAlignmentOverlay
+                          alignment={alignment}
+                          currentAngle={currentAngle}
+                          completedAngles={completedAngles}
+                          videoWidth={videoRef.current?.videoWidth || 640}
+                          videoHeight={videoRef.current?.videoHeight || 480}
+                          objectMode="contain"
+                        />
+                      )}
+                    </CameraFeed>
                   : <UploadArea
                       onFileProcessed={(url: string, w: number, h: number) =>
-                        captureProcessedFrame("Front", url, w, h)
+                        void captureProcessedFrame(currentAngle, url, w, h, {
+                          enforceAlignment: true,
+                        })
                       }
                       onError={setGlobalError}
                     />
@@ -363,6 +457,7 @@ export function FaceCapture({
                     frames={frames}
                     selectedMemberName={selectedMemberName}
                     onRetake={resetWorkflow}
+                    onRetakeAngle={handleRetakeSingleAngle}
                     onEnroll={handleWrapperEnroll}
                     isEnrolling={isEnrolling}
                     framesReady={!!framesReady}
@@ -400,6 +495,19 @@ export function FaceCapture({
                   )}
                 </AnimatePresence>
               </div>
+
+              {/* 5-Angle Guided Progress Strip */}
+              {!framesReady && (
+                <div className="w-full max-w-4xl">
+                  <AngleProgressStrip
+                    frames={frames}
+                    activeAngle={currentAngle}
+                    onSelectAngle={setCurrentAngle}
+                    onRetakeAngle={handleRetakeSingleAngle}
+                    disabled={isProcessing || isEnrolling}
+                  />
+                </div>
+              )}
 
               {/* Bottom Control Bar */}
               {!framesReady && (

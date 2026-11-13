@@ -45,6 +45,8 @@ export interface CapturedFrame {
   label?: string
   file?: File
   angle?: string
+  confidence?: number
+  mirrored?: boolean
 }
 
 export type CaptureSource = "live" | "upload"

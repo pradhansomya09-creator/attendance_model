@@ -2,6 +2,8 @@ import { act, renderHook } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import { useCameraControl } from "./useCameraControl"
 import { useStreamState } from "./useStreamState"
+import { IP_CAMERA_DEVICE_ID } from "@/components/main/stores/cameraStore"
+import { cctvService } from "@/services/cctvService"
 import type { WebSocketService } from "@/services/WebSocketService"
 import type { DetectionResult } from "@/components/main/types"
 
@@ -290,4 +292,53 @@ it("applies the readiness deadline to fallback startup even when play never sett
     "Camera did not deliver video within 10 seconds.",
   )
   act(() => result.current.stopCamera(true))
+})
+
+it("starts and stops a mobile IP camera stream without calling getUserMedia", async () => {
+  const { options, getUserMedia } = setup()
+  const img = document.createElement("img")
+  Object.defineProperty(img, "naturalWidth", { configurable: true, value: 1280 })
+  Object.defineProperty(img, "naturalHeight", { configurable: true, value: 720 })
+
+  const probeSpy = vi.spyOn(cctvService, "probeIpStream").mockResolvedValue({
+    connected: true,
+    resolved_url: "http://192.168.1.10:8080/video",
+    error: null,
+  } as never)
+  const mjpegSpy = vi
+    .spyOn(cctvService, "getIpStreamMjpegUrl")
+    .mockResolvedValue("http://127.0.0.1:7400/cctv/ip-stream/mjpeg?url=http%3A%2F%2F192.168.1.10%3A8080%2Fvideo")
+  const setActiveIpStreamUrl = vi.fn()
+
+  const ipOptions = {
+    ...options,
+    selectedCamera: IP_CAMERA_DEVICE_ID,
+    ipCameraUrl: "http://192.168.1.10:8080/video",
+    ipImageRef: { current: img },
+    setActiveIpStreamUrl,
+  }
+
+  const isProcessingRef = { current: false }
+  const { result } = renderHook(() => {
+    useStreamState({ ...ipOptions, isProcessingRef })
+    return useCameraControl(ipOptions)
+  })
+
+  await act(async () => {
+    await result.current.startCamera()
+  })
+
+  expect(getUserMedia).not.toHaveBeenCalled()
+  expect(mjpegSpy).toHaveBeenCalledWith("http://192.168.1.10:8080/video")
+  expect(setActiveIpStreamUrl).toHaveBeenCalledWith(
+    "http://127.0.0.1:7400/cctv/ip-stream/mjpeg?url=http%3A%2F%2F192.168.1.10%3A8080%2Fvideo",
+  )
+  expect(ipOptions.isScanningRef.current).toBe(true)
+  expect(ipOptions.setCameraActive).toHaveBeenLastCalledWith(true)
+  expect(ipOptions.processCurrentFrameRef.current).toHaveBeenCalledTimes(1)
+
+  act(() => result.current.stopCamera(true))
+  expect(setActiveIpStreamUrl).toHaveBeenLastCalledWith(null)
+  probeSpy.mockRestore()
+  mjpegSpy.mockRestore()
 })

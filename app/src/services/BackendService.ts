@@ -11,7 +11,91 @@ import { ElectronAdapter } from "./adapters/ElectronAdapter"
 import { withLocalBackendHeaders } from "./localBackendScope"
 import { dataUrlToBlob } from "@/utils/dataUrl"
 
-interface DetectionResponse {
+export interface OverlayPoint {
+  x: number
+  y: number
+}
+
+export interface FacialGuideOverlay {
+  image_width: number
+  image_height: number
+  mirrored: boolean
+  bbox: { x: number; y: number; width: number; height: number }
+  features: {
+    left_eye: { center: OverlayPoint; contour: OverlayPoint[] }
+    right_eye: { center: OverlayPoint; contour: OverlayPoint[] }
+    left_eyebrow: OverlayPoint[]
+    right_eyebrow: OverlayPoint[]
+    nose: { tip: OverlayPoint; bridge: OverlayPoint[]; base: OverlayPoint[] }
+    mouth: {
+      left: OverlayPoint
+      right: OverlayPoint
+      center: OverlayPoint
+      contour: OverlayPoint[]
+    }
+    left_ear: OverlayPoint[]
+    right_ear: OverlayPoint[]
+    face_outline: OverlayPoint[]
+  }
+  axes: {
+    horizontal: { x1: number; y1: number; x2: number; y2: number; mid_x: number; mid_y: number }
+    vertical: { x1: number; y1: number; x2: number; y2: number; mid_x: number; mid_y: number }
+  }
+  coordinates: {
+    center_x: number
+    center_y: number
+    norm_x: number
+    norm_y: number
+    offset_x: number
+    offset_y: number
+    face_width_ratio: number
+    face_height_ratio: number
+    yaw: number
+    pitch: number
+    roll: number
+    clarity_score: number
+    brightness: number
+    sharpness: number
+    landmarks: Record<string, OverlayPoint>
+  }
+  occlusion_suspected?: boolean
+}
+
+export interface FaceAlignmentEvaluation {
+  status:
+    | "ready"
+    | "missing"
+    | "multiple_faces"
+    | "poor_lighting"
+    | "too_far"
+    | "too_close"
+    | "off_center"
+    | "too_blurry"
+    | "occluded"
+    | "head_tilted"
+    | "adjust_angle"
+  ready: boolean
+  guidance: string
+  quality_issues: string[]
+  target_angle: string | null
+  angle_detected: string | null
+  metrics: {
+    brightness: number
+    sharpness: number
+    quality_status: string
+    quality_score: number
+    clarity_score: number
+    yaw: number
+    pitch: number
+    roll: number
+    offset_x: number
+    offset_y: number
+    face_height_ratio: number
+  }
+  overlay: FacialGuideOverlay | null
+}
+
+export interface DetectionResponse {
   faces: {
     bbox: [number, number, number, number]
     confidence: number
@@ -19,6 +103,7 @@ interface DetectionResponse {
   }[]
   model_used: string
   session_id?: string
+  alignment?: FaceAlignmentEvaluation | null
 }
 
 interface BackendConfig {
@@ -140,6 +225,9 @@ export class BackendService {
       confidence_threshold?: number
       nms_threshold?: number
       enableLiveness?: boolean
+      includeAlignment?: boolean
+      targetAngle?: string
+      mirrored?: boolean
     } = {},
   ): Promise<DetectionResponse> {
     try {
@@ -158,6 +246,15 @@ export class BackendService {
       formData.append("confidence_threshold", (options.confidence_threshold ?? 0.8).toString())
       formData.append("nms_threshold", (options.nms_threshold ?? 0.3).toString())
       formData.append("enable_liveness_detection", (options.enableLiveness ?? false).toString())
+      if (options.includeAlignment) {
+        formData.append("include_alignment", "true")
+      }
+      if (options.targetAngle) {
+        formData.append("target_angle", options.targetAngle)
+      }
+      if (options.mirrored !== undefined) {
+        formData.append("mirrored", options.mirrored ? "true" : "false")
+      }
 
       const token = await this.getApiToken()
       const headers: Record<string, string> = {}

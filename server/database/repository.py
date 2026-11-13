@@ -21,6 +21,7 @@ from database.models import (
     AttendanceSettings,
     AuditLog,
     Face,
+    FaceAngleTemplate,
 )
 from time_utils import (
     get_local_timezone,
@@ -1420,6 +1421,21 @@ class FaceRepository:
         face.embedding = b""
         face.hash = None
         face.is_deleted = True
+
+        angle_q = select(FaceAngleTemplate).where(
+            FaceAngleTemplate.person_id == person_id,
+            FaceAngleTemplate.is_deleted.is_(False),
+        )
+        if self.organization_id:
+            angle_q = angle_q.where(
+                FaceAngleTemplate.organization_id == self.organization_id
+            )
+        else:
+            angle_q = angle_q.where(FaceAngleTemplate.organization_id.is_(None))
+        angle_res = await self.session.execute(angle_q)
+        for tmpl in angle_res.scalars().all():
+            tmpl.embedding = b""
+            tmpl.is_deleted = True
         return True
 
     async def update_person_id(self, old_id: str, new_id: str) -> bool:
@@ -1439,6 +1455,19 @@ class FaceRepository:
             return False
 
         face.person_id = new_id
+
+        angle_q = select(FaceAngleTemplate).where(
+            FaceAngleTemplate.person_id == old_id
+        )
+        if self.organization_id:
+            angle_q = angle_q.where(
+                FaceAngleTemplate.organization_id == self.organization_id
+            )
+        else:
+            angle_q = angle_q.where(FaceAngleTemplate.organization_id.is_(None))
+        angle_res = await self.session.execute(angle_q)
+        for tmpl in angle_res.scalars().all():
+            tmpl.person_id = new_id
         return True
 
     async def clear_faces(self) -> bool:
@@ -1454,7 +1483,100 @@ class FaceRepository:
             f.hash = None
             f.is_deleted = True
             f.sync_dirty = True
+
+        angle_q = select(FaceAngleTemplate)
+        if self.organization_id:
+            angle_q = angle_q.where(
+                FaceAngleTemplate.organization_id == self.organization_id
+            )
+        else:
+            angle_q = angle_q.where(FaceAngleTemplate.organization_id.is_(None))
+        angle_res = await self.session.execute(angle_q)
+        for tmpl in angle_res.scalars().all():
+            tmpl.embedding = b""
+            tmpl.is_deleted = True
         return True
+
+    async def upsert_angle_templates(
+        self, person_id: str, templates: List[Dict[str, Any]]
+    ) -> int:
+        """Replace active encrypted per-angle templates for a person."""
+        existing_q = select(FaceAngleTemplate).where(
+            FaceAngleTemplate.person_id == person_id
+        )
+        if self.organization_id:
+            existing_q = existing_q.where(
+                FaceAngleTemplate.organization_id == self.organization_id
+            )
+        else:
+            existing_q = existing_q.where(FaceAngleTemplate.organization_id.is_(None))
+        existing_res = await self.session.execute(existing_q)
+        by_angle = {row.angle: row for row in existing_res.scalars().all()}
+
+        seen_angles = set()
+        saved = 0
+        for item in templates:
+            angle = str(item["angle"])
+            seen_angles.add(angle)
+            row = by_angle.get(angle)
+            if row:
+                row.embedding = item["embedding"]
+                row.embedding_dimension = int(item["dimension"])
+                row.yaw = float(item.get("yaw", 0.0))
+                row.pitch = float(item.get("pitch", 0.0))
+                row.clarity_score = float(item.get("clarity_score", 0.0))
+                row.is_deleted = False
+            else:
+                row = FaceAngleTemplate(
+                    id=ulid.ulid(),
+                    person_id=person_id,
+                    organization_id=self.organization_id,
+                    angle=angle,
+                    embedding=item["embedding"],
+                    embedding_dimension=int(item["dimension"]),
+                    yaw=float(item.get("yaw", 0.0)),
+                    pitch=float(item.get("pitch", 0.0)),
+                    clarity_score=float(item.get("clarity_score", 0.0)),
+                    is_deleted=False,
+                )
+                self.session.add(row)
+            saved += 1
+
+        for angle, row in by_angle.items():
+            if angle not in seen_angles:
+                row.embedding = b""
+                row.is_deleted = True
+
+        return saved
+
+    async def get_angle_templates_by_person(
+        self, person_id: str
+    ) -> List[FaceAngleTemplate]:
+        query = select(FaceAngleTemplate).where(
+            FaceAngleTemplate.person_id == person_id,
+            FaceAngleTemplate.is_deleted.is_(False),
+        )
+        if self.organization_id:
+            query = query.where(
+                FaceAngleTemplate.organization_id == self.organization_id
+            )
+        else:
+            query = query.where(FaceAngleTemplate.organization_id.is_(None))
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+
+    async def get_all_angle_templates(self) -> List[FaceAngleTemplate]:
+        query = select(FaceAngleTemplate).where(
+            FaceAngleTemplate.is_deleted.is_(False)
+        )
+        if self.organization_id:
+            query = query.where(
+                FaceAngleTemplate.organization_id == self.organization_id
+            )
+        else:
+            query = query.where(FaceAngleTemplate.organization_id.is_(None))
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
 
     async def get_stats(self) -> Dict[str, Any]:
         query = select(func.count()).select_from(Face).where(Face.is_deleted.is_(False))

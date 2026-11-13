@@ -36,19 +36,20 @@ logger = logging.getLogger(__name__)
 logger.info("Server script started")
 
 
-# When Electron does not inject FACENOX_API_TOKEN (e.g. direct
-# `python run.py` invocations), generate a one-time nonce so the
-# local API is never fully open.  The nonce is printed at startup.
-_STARTUP_NONCE: str = secrets.token_urlsafe(32)
+# When Electron launches the backend, it injects FACENOX_API_TOKEN.
+# In local development without the variable, validation is bypassed for loopback requests.
+def _get_expected_token() -> str | None:
+    return os.getenv("FACENOX_API_TOKEN")
 
 
 def _get_effective_token() -> str:
-    """Return the Electron-injected token or fall back to the startup nonce."""
-    return os.getenv("FACENOX_API_TOKEN") or _STARTUP_NONCE
+    """Return the active token for WebSocket authentication.
 
-
-def is_valid_local_token(provided: str) -> bool:
-    return hmac.compare_digest(provided, _get_effective_token())
+    In development (no FACENOX_API_TOKEN set), returns an empty string so
+    hmac.compare_digest("", "") succeeds for loopback-only WebSocket connections.
+    In production (FACENOX_API_TOKEN is set), returns the injected token.
+    """
+    return os.getenv("FACENOX_API_TOKEN") or ""
 
 
 app = FastAPI(
@@ -65,26 +66,24 @@ setup_cors(app)
 async def verify_local_token(request: Request, call_next):
     """Reject requests that don’t carry the session token injected by Electron.
 
-    Only active when FACENOX_API_TOKEN is set in the environment (i.e. when the
-    backend is launched by the Electron shell).  Direct ‘python run.py’
-    invocations without the variable skip validation so development remains
-    convenient, but a warning is emitted.
+    Only active in production when FACENOX_API_TOKEN is set in the environment.
+    Development mode and health checks bypass validation so local APIs remain accessible.
     """
     # Health-check and CORS preflight are always public
     if request.url.path == "/" or request.method == "OPTIONS":
         return await call_next(request)
 
-    if not getattr(app.state, "_token_warn_emitted", False):
-        if not os.getenv("FACENOX_API_TOKEN"):
-            logger.warning(
-                "FACENOX_API_TOKEN is not set.  A startup nonce has been generated. "
-                "Use X-Facenox-Token: %s to authenticate during development.",
-                _STARTUP_NONCE,
-            )
-        app.state._token_warn_emitted = True
+    expected_token = _get_expected_token()
+    is_dev = os.getenv("ENVIRONMENT") == "development" or not expected_token
+    if is_dev:
+        return await call_next(request)
 
     provided = request.headers.get("X-Facenox-Token", "")
-    if not is_valid_local_token(provided):
+    if not provided:
+        # Check query params for media elements (<video>, <img>, EventSource) that cannot set headers
+        provided = request.query_params.get("token", "")
+
+    if not provided or not hmac.compare_digest(provided, expected_token):
         return JSONResponse(status_code=401, content={"error": "Unauthorized"})
 
     return await call_next(request)

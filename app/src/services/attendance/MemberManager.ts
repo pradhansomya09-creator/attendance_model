@@ -215,6 +215,93 @@ export class MemberManager {
     }
   }
 
+  async enrollFaceMultiAngle(
+    groupId: string,
+    personId: string,
+    captures: {
+      angle: string
+      imageData: Blob | string
+      bbox: number[]
+      landmarks_5: number[][]
+      mirrored?: boolean
+    }[],
+    options?: { mirrored?: boolean },
+  ): Promise<{
+    success: boolean
+    message?: string
+    error?: string
+    angles_enrolled?: string[]
+    angle_count?: number
+  }> {
+    try {
+      if (captures.length < 5) {
+        return {
+          success: false,
+          error: `At least 5 distinct face angles are required (got ${captures.length}).`,
+        }
+      }
+
+      const formData = new FormData()
+      const metaList: {
+        angle: string
+        bbox: number[]
+        landmarks_5: number[][]
+        mirrored?: boolean
+      }[] = []
+
+      for (const cap of captures) {
+        let imageBlob: Blob
+        if (typeof cap.imageData === "string") {
+          const dataUrl =
+            cap.imageData.startsWith("data:") ?
+              cap.imageData
+            : `data:image/jpeg;base64,${cap.imageData}`
+          imageBlob = dataUrlToBlob(dataUrl)
+        } else {
+          imageBlob = cap.imageData
+        }
+        formData.append("images", imageBlob, `${cap.angle}.jpg`)
+        metaList.push({
+          angle: cap.angle,
+          bbox: cap.bbox,
+          landmarks_5: cap.landmarks_5,
+          mirrored: cap.mirrored,
+        })
+      }
+
+      formData.append(
+        "metadata",
+        JSON.stringify({
+          captures: metaList,
+          mirrored: options?.mirrored ?? false,
+        }),
+      )
+
+      const url = `${this.apiEndpoints.groups}/${groupId}/persons/${personId}/enroll-multi-angle`
+      const result = await this.httpClient.postMultipart<{
+        success: boolean
+        message?: string
+        angles_enrolled?: string[]
+        angle_count?: number
+      }>(url, formData)
+
+      notifyDataChanged()
+      webSocketService.refreshActiveStream()
+      return {
+        success: true,
+        message: result.message,
+        angles_enrolled: result.angles_enrolled,
+        angle_count: result.angle_count,
+      }
+    } catch (error) {
+      console.error("Error enrolling multi-angle face for group person:", error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to enroll multi-angle face data",
+      }
+    }
+  }
+
   async removeFaceDataForGroupPerson(
     groupId: string,
     personId: string,

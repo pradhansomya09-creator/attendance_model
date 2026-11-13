@@ -3,10 +3,13 @@ import time
 
 import cv2
 import numpy as np
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 
 from api.schemas import DetectionResponse
 from config.models import FACE_DETECTOR_CONFIG
+from core.vision.face_geometry import evaluate_enrollment_alignment
 from hooks import (
     process_face_detection,
     process_liveness_detection,
@@ -29,6 +32,9 @@ async def detect_faces(
     confidence_threshold: float = Form(FACE_DETECTOR_CONFIG["score_threshold"]),
     nms_threshold: float = Form(FACE_DETECTOR_CONFIG["nms_threshold"]),
     enable_liveness_detection: bool = Form(False),
+    include_alignment: bool = Form(False),
+    target_angle: Optional[str] = Form(None),
+    mirrored: bool = Form(False),
 ):
     """
     Detect faces in a single binary image (Multipart)
@@ -90,6 +96,16 @@ async def detect_faces(
 
         processing_time = time.time() - start_time
         serialized_faces = serialize_faces(faces, "/detect endpoint")
+        alignment_payload = (
+            evaluate_enrollment_alignment(
+                image_bgr,
+                serialized_faces,
+                target_angle=target_angle,
+                mirrored=mirrored,
+            )
+            if include_alignment
+            else None
+        )
 
         processing_time_ms = processing_time * 1000
         if processing_time_ms > 50:
@@ -105,6 +121,7 @@ async def detect_faces(
             processing_time=processing_time,
             model_used=model_type,
             suggested_skip=suggested_skip,
+            alignment=alignment_payload,
         )
 
     except HTTPException:

@@ -96,7 +96,7 @@ class FaceDetector:
             return []
 
         margin = self.edge_margin if enable_liveness else 0
-        min_size = self.min_face_size if enable_liveness else 0
+        min_size = self.min_face_size if enable_liveness else max(35, int(self.min_face_size * 0.5))
 
         detections = []
         for face in faces:

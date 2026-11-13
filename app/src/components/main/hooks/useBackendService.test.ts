@@ -105,6 +105,7 @@ describe("useBackendService live configuration", () => {
       enable_liveness_detection: false,
       max_recognition_faces_per_frame: 5,
       device_id: "test-device",
+      camera_id: "cam-main-1",
     })
     expect(socket.configs().every((config) => !("scan_behavior" in config))).toBe(true)
   })

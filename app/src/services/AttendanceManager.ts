@@ -175,6 +175,27 @@ export class AttendanceManager {
     )
   }
 
+  async enrollFaceMultiAngle(
+    groupId: string,
+    personId: string,
+    captures: {
+      angle: string
+      imageData: Blob | string
+      bbox: number[]
+      landmarks_5: number[][]
+      mirrored?: boolean
+    }[],
+    options?: { mirrored?: boolean },
+  ): Promise<{
+    success: boolean
+    message?: string
+    error?: string
+    angles_enrolled?: string[]
+    angle_count?: number
+  }> {
+    return this.memberManager.enrollFaceMultiAngle(groupId, personId, captures, options)
+  }
+
   async removeFaceDataForGroupPerson(
     groupId: string,
     personId: string,

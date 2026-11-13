@@ -19,6 +19,27 @@ This page covers the shipped desktop feature set and the scope of the current Fa
 - Configure attendance timing behavior in settings.
 - Review historical attendance data and export reports.
 
+### V-LASER Virtual Grid & Intelligent Spatial Tracking
+
+- **Software-Defined Laser Grids**: Simulates laser lines, grids, and polygon boundaries directly on CCTV footage without extra hardware.
+- **Resolution-Independent Coordinates**: Normalized space $[0.0, 1.0]^2$ preserves boundary positions across resolution changes.
+- **Bottom-Center Footprint Anchoring**: Tracks spatial positions based on person bottom-center grounding point $(x + w/2, y + h)$.
+- **Classroom Zone Management**: Ray-casting point-in-polygon zone classification with 2-frame hysteresis.
+- **Virtual Entry/Exit Lines**: Directional segment intersection with $1.0$-second jitter debouncing.
+- **Conservative Identity Association**: Strict decoupling of kinematic tracking from biometric identification (Case A, Case B, Case C).
+- **Dual-Criteria Attendance Gatekeeper**: Attendance requires both verified biometric identity and validated classroom presence.
+- **Real-Time Visual Editor**: Interactive React/Electron SVG canvas with live reticles and boundary validation.
+
+### Class Session Video Playback & Attendance Review
+
+- **Multi-Filter Class Querying**: Authorized faculty filter recorded sessions by Course, Section, Date, and Session Timetable.
+- **HTML5 Range Video Streaming (HTTP 206)**: Smooth seeking, forward/rewind (±5s), speed adjustments ($0.5\times - 2.0\times$), and fullscreen controls.
+- **Timeline Detection Bookmarks**: Interactive timeline pins and roster bookmarks indicate exact video timestamps when students were seen by CCTV/V-LASER.
+- **Audited Attendance Corrections**: Faculty can mark students Present, Late, or Absent with mandatory review justifications recorded to an immutable audit trail (`attendance_correction_audits`).
+- **Comprehensive Video Access Audits**: Every video stream request logs the viewer identity, timestamp, byte ranges, and client IP address (`video_access_audits`).
+- **Storage & Retention Governance**: Configurable retention limits (e.g. 30 days) with automated nightly cleanup of expired footage while preserving audit metadata.
+- **Zero-Trust Tailscale Network Access**: Stable MagicDNS device naming (`facenox-core.tailnet.ts.net`), isolated CCTV VLAN subnet routing (`192.168.10.0/24`), granular ACL tags, and institutional HTTPS reverse proxy guidelines.
+
 ### Privacy-first biometric architecture
 
 - Biometric enrollment via live camera capture or batch photo import.

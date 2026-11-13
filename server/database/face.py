@@ -124,6 +124,115 @@ class FaceDatabaseManager:
             logger.error(f"Failed to get all persons: {e}")
             return {}
 
+    async def save_angle_templates(
+        self, person_id: str, templates: List[Dict[str, Any]]
+    ) -> bool:
+        """Encrypt and persist per-angle face embeddings for multi-angle recognition."""
+        try:
+            encrypted_items: List[Dict[str, Any]] = []
+            for item in templates:
+                vec = item["embedding"]
+                blob = self._embedding_to_blob(vec)
+                encrypted_blob = encrypt_local_data(blob)
+                encrypted_items.append(
+                    {
+                        "angle": str(item["angle"]),
+                        "embedding": encrypted_blob,
+                        "dimension": len(vec),
+                        "yaw": float(item.get("yaw", 0.0)),
+                        "pitch": float(item.get("pitch", 0.0)),
+                        "clarity_score": float(item.get("clarity_score", 0.0)),
+                    }
+                )
+            async with AsyncSessionLocal() as session:
+                repo = FaceRepository(session, self.organization_id)
+                await repo.upsert_angle_templates(person_id, encrypted_items)
+                await session.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to save angle templates for {person_id}: {e}")
+            return False
+
+    async def get_angle_templates(self, person_id: str) -> List[Dict[str, Any]]:
+        """Decrypt all stored angle templates for a specific person."""
+        try:
+            async with AsyncSessionLocal() as session:
+                repo = FaceRepository(session, self.organization_id)
+                rows = await repo.get_angle_templates_by_person(person_id)
+                entries: List[Dict[str, Any]] = []
+                for row in rows:
+                    if not row.embedding:
+                        continue
+                    try:
+                        decrypted_blob = decrypt_local_data(row.embedding)
+                        entries.append(
+                            {
+                                "angle": row.angle,
+                                "embedding": self._blob_to_embedding(decrypted_blob),
+                                "yaw": row.yaw,
+                                "pitch": row.pitch,
+                                "clarity_score": row.clarity_score,
+                            }
+                        )
+                    except Exception as dec_err:
+                        logger.warning(
+                            "Failed to decrypt angle template (%s) for %s: %s",
+                            row.angle,
+                            person_id,
+                            dec_err,
+                        )
+                return entries
+        except Exception as e:
+            logger.error(f"Failed to get angle templates for {person_id}: {e}")
+            return []
+
+    async def get_all_template_entries(self) -> Tuple[List[str], List[np.ndarray]]:
+        """Load fused centroids and per-angle embeddings into aligned parallel lists."""
+        try:
+            async with AsyncSessionLocal() as session:
+                repo = FaceRepository(session, self.organization_id)
+                faces = await repo.get_all_faces()
+                angles = await repo.get_all_angle_templates()
+
+                person_ids: List[str] = []
+                embeddings: List[np.ndarray] = []
+                active_persons = set()
+
+                for f in faces:
+                    try:
+                        decrypted_blob = decrypt_local_data(f.embedding)
+                        vec = self._blob_to_embedding(decrypted_blob)
+                        person_ids.append(f.person_id)
+                        embeddings.append(vec)
+                        active_persons.add(f.person_id)
+                    except Exception as dec_err:
+                        logger.warning(
+                            "Failed to decrypt face embedding for person %s: %s",
+                            f.person_id,
+                            dec_err,
+                        )
+
+                for tmpl in angles:
+                    if tmpl.person_id not in active_persons or not tmpl.embedding:
+                        continue
+                    try:
+                        decrypted_blob = decrypt_local_data(tmpl.embedding)
+                        vec = self._blob_to_embedding(decrypted_blob)
+                        person_ids.append(tmpl.person_id)
+                        embeddings.append(vec)
+                    except Exception as dec_err:
+                        logger.warning(
+                            "Failed to decrypt angle template (%s) for person %s: %s",
+                            tmpl.angle,
+                            tmpl.person_id,
+                            dec_err,
+                        )
+
+                return person_ids, embeddings
+        except Exception as e:
+            logger.error(f"Failed to get all template entries: {e}")
+            return [], []
+
     async def list_persons(self) -> List[str]:
         """Get list of all person IDs"""
         try:

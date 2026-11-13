@@ -1,7 +1,7 @@
 """API Schemas"""
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from enum import Enum
 from zoneinfo import ZoneInfo
@@ -62,6 +62,7 @@ class DetectionResponse(BaseModel):
     processing_time: float
     model_used: str
     suggested_skip: int = 0
+    alignment: Optional[Dict[str, Any]] = None
 
 
 # ============================================================================

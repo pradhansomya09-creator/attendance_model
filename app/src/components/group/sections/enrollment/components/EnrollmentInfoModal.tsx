@@ -19,14 +19,14 @@ export function EnrollmentInfoModal({
 }: EnrollmentInfoModalProps) {
   const slides = [
     {
-      title: "Use a camera or photo",
+      title: "Capture 5 distinct face angles",
       description:
-        "Capture a photo with the attendance camera or select an existing photo. Use a clear, front-facing image with even lighting.",
+        "Follow the on-screen guide to capture 5 clear views: straight forward, slight left, slight right, left profile, and right profile.",
     },
     {
-      title: "Face the camera",
+      title: "Keep your face aligned & well-lit",
       description:
-        "Face the camera directly with open eyes and a neutral expression. Avoid dim lighting, heavy shadows, and accessories like hats or sunglasses that obstruct the face.",
+        "Center your face inside the alignment oval with even front lighting. Stay still so eyes, eyebrows, nose, mouth, and ears are clearly visible.",
     },
   ] as const
 

@@ -1042,6 +1042,174 @@ class AttendanceService:
                 or "Failed to save face data. Please try enrolling again."
             )
 
+    async def enroll_member_multi_angle(
+        self,
+        group_id: str,
+        person_id: str,
+        captures: List[Dict[str, Any]],
+        mirrored: bool = False,
+    ) -> Dict[str, Any]:
+        """Validate >=5 distinct facial angle captures in-memory and enroll unified + per-angle templates."""
+        if not self.face_recognizer:
+            raise ValueError("Face recognition system not available")
+
+        group = await self.repo.get_group(group_id)
+        if not group:
+            raise ValueError("Group not found")
+
+        member = await self.repo.get_member(person_id)
+        if not member:
+            raise ValueError("Member not found")
+
+        if member.group_id != group_id:
+            raise ValueError("Member does not belong to this group")
+
+        from core.vision.face_geometry import (
+            ANGLE_STEP_SPECS,
+            ENROLLMENT_ANGLES,
+            evaluate_enrollment_alignment,
+            normalize_angle_key,
+        )
+        from hooks import process_face_detection
+        from utils.face_utils import serialize_faces
+
+        normalized_captures: Dict[str, Dict[str, Any]] = {}
+        for item in captures:
+            norm_angle = normalize_angle_key(item.get("angle"))
+            if not norm_angle or norm_angle not in ANGLE_STEP_SPECS:
+                raise ValueError(f"Unsupported enrollment angle: {item.get('angle')}")
+            normalized_captures[norm_angle] = item
+
+        missing_angles = [a for a in ENROLLMENT_ANGLES if a not in normalized_captures]
+        if len(normalized_captures) < len(ENROLLMENT_ANGLES) or missing_angles:
+            missing_labels = ", ".join(
+                ANGLE_STEP_SPECS[a]["label"] for a in missing_angles
+            )
+            raise ValueError(
+                f"At least 5 distinct face angles are required before enrollment. Missing: {missing_labels}."
+            )
+
+        prepared_samples: List[Dict[str, Any]] = []
+        try:
+            for angle in ENROLLMENT_ANGLES:
+                cap = normalized_captures[angle]
+                img = cap.get("image")
+                if img is None:
+                    raise ValueError(f"Invalid image for angle '{ANGLE_STEP_SPECS[angle]['label']}'.")
+
+                detections = await process_face_detection(
+                    img, min_face_size=0, enable_liveness=False
+                )
+                if not detections:
+                    raise ValueError(
+                        f"No detectable face found in '{ANGLE_STEP_SPECS[angle]['label']}' capture."
+                    )
+
+                serialized = serialize_faces(detections, "multi-angle enroll")
+                item_mirrored = bool(cap.get("mirrored", mirrored))
+                alignment = evaluate_enrollment_alignment(
+                    img, serialized, target_angle=None, mirrored=item_mirrored
+                )
+                status = alignment.get("status")
+                if status in (
+                    "missing",
+                    "multiple_faces",
+                    "poor_lighting",
+                    "too_blurry",
+                    "occluded",
+                    "too_far",
+                    "too_close",
+                ):
+                    raise ValueError(
+                        f"{ANGLE_STEP_SPECS[angle]['label']}: {alignment.get('guidance')}"
+                    )
+
+                metrics = alignment.get("metrics") or {}
+                yaw = float(metrics.get("yaw", 0.0))
+                pitch = float(metrics.get("pitch", 0.0))
+                clarity = float(metrics.get("clarity_score", 0.5))
+
+                # Validate directional pose with realistic capture tolerances
+                if angle == "front" and abs(yaw) > 14.0:
+                    raise ValueError(
+                        f"Forward Facing capture is turned ({yaw:.1f} deg). Please recapture facing straight ahead."
+                    )
+                if angle == "slight_left" and (yaw > -5.5 or yaw < -32.0):
+                    raise ValueError(
+                        f"Slight Left capture angle out of range ({yaw:.1f} deg). Turn slightly left."
+                    )
+                if angle == "slight_right" and (yaw < 5.5 or yaw > 32.0):
+                    raise ValueError(
+                        f"Slight Right capture angle out of range ({yaw:.1f} deg). Turn slightly right."
+                    )
+                if angle == "left_profile" and yaw > -14.0:
+                    raise ValueError(
+                        f"Left Profile capture is not turned far enough left ({yaw:.1f} deg)."
+                    )
+                if angle == "right_profile" and yaw < 14.0:
+                    raise ValueError(
+                        f"Right Profile capture is not turned far enough right ({yaw:.1f} deg)."
+                    )
+
+                def _det_area(f: Dict[str, Any]) -> float:
+                    b = f.get("bbox")
+                    if isinstance(b, (list, tuple)) and len(b) >= 4:
+                        return float(b[2]) * float(b[3])
+                    if isinstance(b, dict):
+                        return float(b.get("width", 0.0)) * float(b.get("height", 0.0))
+                    return 0.0
+
+                primary_det = max(serialized, key=_det_area)
+                landmarks_5 = cap.get("landmarks_5") or primary_det.get("landmarks_5")
+                if not landmarks_5:
+                    raise ValueError(
+                        f"Missing facial landmarks in '{ANGLE_STEP_SPECS[angle]['label']}' capture."
+                    )
+
+                prepared_samples.append(
+                    {
+                        "angle": angle,
+                        "image": img,
+                        "landmarks_5": landmarks_5,
+                        "yaw": yaw,
+                        "pitch": pitch,
+                        "clarity_score": clarity,
+                    }
+                )
+
+            result = await self.face_recognizer.enroll_person_multi_angle(
+                person_id, prepared_samples, self.repo.organization_id
+            )
+        finally:
+            # Discard in-memory frames immediately after extracting biometric embeddings
+            for sample in prepared_samples:
+                sample.pop("image", None)
+            prepared_samples.clear()
+            for cap in captures:
+                cap.pop("image", None)
+
+        if result.get("success") and result.get("database_saved") is not False:
+            from services.live_stream_service import LiveStreamService
+
+            LiveStreamService.invalidate_all(self.repo.organization_id)
+            return {
+                "success": True,
+                "message": (
+                    f"Multi-angle face profile ({result.get('angle_count', 5)} angles) enrolled "
+                    f"for {person_id} in group {group.name}"
+                ),
+                "person_id": person_id,
+                "group_id": group_id,
+                "angles_enrolled": result.get("angles_enrolled", list(ENROLLMENT_ANGLES)),
+                "angle_count": result.get("angle_count", 5),
+                "total_persons": result.get("total_persons", 0),
+            }
+
+        raise ValueError(
+            result.get("error")
+            or "Failed to save multi-angle face profile. Please try again."
+        )
+
     async def remove_face_data(self, group_id: str, person_id: str) -> Dict[str, Any]:
         """Remove face data for a person"""
         if not self.face_recognizer:

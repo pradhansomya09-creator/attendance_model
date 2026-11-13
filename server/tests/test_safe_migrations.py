@@ -16,7 +16,7 @@ from database import migrate
 
 
 SOURCE_REVISION = "e3b4c5d6e7f8"
-HEAD_REVISION = "s4t5u6v7w8x9"
+HEAD_REVISION = "v1w2x3y4z5a6"
 AUTH_KEY = hashlib.sha256(b"facenox-generation-tests").digest()
 
 

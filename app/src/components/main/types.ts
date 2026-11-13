@@ -47,12 +47,69 @@ export interface DetectionResult {
   model_used: string
 }
 
+export interface ImageQualityTelemetry {
+  status: "green" | "yellow" | "red"
+  score: number
+  brightness: number
+  contrast: number
+  sharpness: number
+  haze_score: number
+  overexposed_ratio: number
+  underexposed_ratio: number
+  obstruction_score: number
+  is_ir_mode: boolean
+  recognition_reliable: boolean
+  issues: string[]
+  enhancements_applied: string[]
+}
+
+export interface HeadPoseTelemetry {
+  yaw: number
+  pitch: number
+  roll: number
+  pose_ok: boolean
+  occlusion_suspected: boolean
+  visibility_score: number
+  clarity_score: number
+}
+
+export interface HeadcountSummaryTelemetry {
+  enrolled: number
+  unique_detected: number
+  successfully_identified: number
+  unknown_individuals: number
+  pending_verification: number
+  confirmed_present: number
+  section_mismatches: number
+  duplicate_alerts: number
+}
+
+export interface CctvAlertMessage {
+  type: "cctv_alert"
+  alert_type: "quality_warning" | "unknown_student" | "section_mismatch" | string
+  severity: "info" | "warning" | "critical" | string
+  camera_id?: string | null
+  group_id?: string | null
+  detection_id?: string | null
+  tracking_id?: string | null
+  person_id?: string | null
+  student_name?: string | null
+  actual_section?: string | null
+  scheduled_section?: string | null
+  quality_status?: string | null
+  quality_score?: number | null
+  issues?: string[]
+  message: string
+  timestamp: number
+}
+
 export interface WebSocketFaceData {
   bbox?: number[]
   confidence?: number
   track_id?: number
   landmarks_5?: number[][] // Required by our pipeline; validated at mapping time.
   low_light?: boolean
+  head_pose?: HeadPoseTelemetry
   liveness?: {
     is_real?: boolean | null
     confidence?: number
@@ -83,6 +140,8 @@ export interface WebSocketDetectionResponse {
   frame_timestamp?: number
   frame_dropped?: boolean
   suggested_skip?: number
+  image_quality?: ImageQualityTelemetry
+  headcount_summary?: HeadcountSummaryTelemetry | null
   performance_metrics?: {
     actual_fps?: number
     overload_counter?: number

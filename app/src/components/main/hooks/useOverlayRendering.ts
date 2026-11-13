@@ -31,6 +31,7 @@ interface VisibleFaceState {
 
 interface UseOverlayRenderingOptions {
   videoRef: React.RefObject<HTMLVideoElement | null>
+  ipImageRef?: React.RefObject<HTMLImageElement | null>
   overlayCanvasRef: React.RefObject<HTMLCanvasElement | null>
   animationFrameRef: React.MutableRefObject<number | undefined>
   videoRectRef: React.RefObject<DOMRect | null>
@@ -38,11 +39,17 @@ interface UseOverlayRenderingOptions {
 }
 
 export function useOverlayRendering(options: UseOverlayRenderingOptions) {
-  const { videoRef, overlayCanvasRef, animationFrameRef, videoRectRef, lastVideoRectUpdateRef } =
-    options
+  const {
+    videoRef,
+    ipImageRef,
+    overlayCanvasRef,
+    animationFrameRef,
+    videoRectRef,
+    lastVideoRectUpdateRef,
+  } = options
 
   const { currentDetections, currentRecognitionResults } = useDetectionStore()
-  const { isStreaming } = useCameraStore()
+  const { isStreaming, activeIpStreamUrl } = useCameraStore()
   const { persistentCooldowns, currentGroup, enableSpoofDetection } = useAttendanceStore()
   const { quickSettings } = useUIStore()
 
@@ -78,27 +85,31 @@ export function useOverlayRendering(options: UseOverlayRenderingOptions) {
   }, [])
 
   const getVideoRect = useCallback(() => {
-    const video = videoRef.current
-    if (!video) return null
+    const mediaEl = activeIpStreamUrl && ipImageRef?.current ? ipImageRef.current : videoRef.current
+    if (!mediaEl) return null
 
     const now = Date.now()
     if (!videoRectRef.current || now - (lastVideoRectUpdateRef.current ?? 0) > 200) {
       ;(videoRectRef as React.MutableRefObject<DOMRect | null>).current =
-        video.getBoundingClientRect()
+        mediaEl.getBoundingClientRect()
       ;(lastVideoRectUpdateRef as React.MutableRefObject<number>).current = now
     }
 
     return videoRectRef.current
-  }, [videoRef, videoRectRef, lastVideoRectUpdateRef])
+  }, [activeIpStreamUrl, ipImageRef, videoRef, videoRectRef, lastVideoRectUpdateRef])
 
   const calculateScaleFactors = useCallback(() => {
     const video = videoRef.current
+    const img = ipImageRef?.current
     const overlayCanvas = overlayCanvasRef.current
 
-    if (!video || !overlayCanvas) return null
+    if (!overlayCanvas) return null
 
-    const currentVideoWidth = video.videoWidth
-    const currentVideoHeight = video.videoHeight
+    const currentVideoWidth = activeIpStreamUrl && img ? img.naturalWidth : (video?.videoWidth ?? 0)
+    const currentVideoHeight =
+      activeIpStreamUrl && img ? img.naturalHeight : (video?.videoHeight ?? 0)
+
+    if (currentVideoWidth <= 0 || currentVideoHeight <= 0) return null
 
     if (
       lastVideoSizeRef.current.width === currentVideoWidth &&
@@ -161,7 +172,7 @@ export function useOverlayRendering(options: UseOverlayRenderingOptions) {
 
     scaleFactorsRef.current = { scaleX, scaleY, offsetX, offsetY }
     return scaleFactorsRef.current
-  }, [videoRef, overlayCanvasRef, quickSettings.cameraFitCover])
+  }, [activeIpStreamUrl, ipImageRef, videoRef, overlayCanvasRef, quickSettings.cameraFitCover])
 
   const handleDrawOverlays = useCallback(
     (detections: DetectionResult | null) => {

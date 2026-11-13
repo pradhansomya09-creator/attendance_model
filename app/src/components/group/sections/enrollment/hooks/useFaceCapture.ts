@@ -7,6 +7,14 @@ import { makeId } from "@/utils/imageHelpers"
 import { dataUrlToBlob } from "@/utils/dataUrl"
 import { isTechnicalErrorMessage } from "@/utils/errorText"
 import { validateAndGetBestFace } from "@/utils/faceValidation"
+import {
+  areAllRequiredAnglesCollected,
+  ENROLLMENT_ANGLE_STEPS,
+  getCollectedAngleCount,
+  getNextMissingAngle,
+  isValidCapturedFrame,
+  type EnrollmentAngleKey,
+} from "../enrollmentAngles"
 
 export function useFaceCapture(
   group: AttendanceGroup | null,
@@ -15,6 +23,7 @@ export function useFaceCapture(
   dialog?: Pick<DialogAPI, "confirm">,
 ) {
   const [frames, setFrames] = useState<CapturedFrame[]>([])
+  const [currentAngle, setCurrentAngle] = useState<EnrollmentAngleKey>("front")
   const [globalError, setGlobalError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [isEnrolling, setIsEnrolling] = useState(false)
@@ -30,6 +39,13 @@ export function useFaceCapture(
 
   const resetFrames = useCallback(() => {
     setFrames([])
+    setCurrentAngle("front")
+  }, [])
+
+  const removeAngleFrame = useCallback((angle: EnrollmentAngleKey) => {
+    setFrames((prev) => prev.filter((f) => f.angle !== angle))
+    setCurrentAngle(angle)
+    setGlobalError(null)
   }, [])
 
   const updateFrame = useCallback(
@@ -40,7 +56,18 @@ export function useFaceCapture(
   )
 
   const captureProcessedFrame = useCallback(
-    async (angle: string, dataUrl: string, width: number, height: number) => {
+    async (
+      angle: string,
+      dataUrl: string,
+      width: number,
+      height: number,
+      options?: { enforceAlignment?: boolean },
+    ) => {
+      const canonicalAngle = (
+        ENROLLMENT_ANGLE_STEPS.some((s) => s.angle === angle)
+          ? angle
+          : "front"
+      ) as EnrollmentAngleKey
       const id = makeId()
 
       setGlobalError(null)
@@ -48,11 +75,13 @@ export function useFaceCapture(
 
       // Replace any previous capture for this slot
       setFrames((prev) => [
-        ...prev.filter((frame) => frame.angle !== angle),
+        ...prev.filter((frame) => frame.angle !== canonicalAngle),
         {
           id,
-          angle,
-          label: angle,
+          angle: canonicalAngle,
+          label:
+            ENROLLMENT_ANGLE_STEPS.find((s) => s.angle === canonicalAngle)?.label ||
+            canonicalAngle,
           dataUrl,
           width,
           height,
@@ -66,26 +95,54 @@ export function useFaceCapture(
         const detection = await backendService.detectFaces(blob, {
           model_type: "face_detector",
           enableLiveness: false, // Enrollment should not enforce liveness
+          includeAlignment: true,
+          targetAngle: canonicalAngle,
+          mirrored: false,
         })
 
         const bestFace = validateAndGetBestFace(detection)
 
-        updateFrame(id, (frame) => ({
-          ...frame,
-          status: "ready",
-          confidence: bestFace.confidence,
-          bbox: bestFace.bbox,
-          landmarks_5: bestFace.landmarks_5,
-          error: undefined,
-        }))
+        if (
+          options?.enforceAlignment !== false &&
+          detection.alignment &&
+          !detection.alignment.ready
+        ) {
+          throw new Error(
+            detection.alignment.guidance ||
+              `Please align your face clearly for ${canonicalAngle.replace("_", " ")}.`,
+          )
+        }
+
+        const updatedSnapshot: CapturedFrame[] = []
+        setFrames((prev) => {
+          const next = prev.map((frame) => {
+            if (frame.id !== id) return frame
+            return {
+              ...frame,
+              status: "ready" as const,
+              confidence: bestFace.confidence,
+              bbox: bestFace.bbox,
+              landmarks_5: bestFace.landmarks_5,
+              error: undefined,
+            }
+          })
+          updatedSnapshot.push(...next)
+          return next
+        })
+
+        // Advance to next missing angle automatically
+        const nextMissing = getNextMissingAngle(updatedSnapshot, canonicalAngle)
+        setCurrentAngle(nextMissing)
+        return true
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Could not check the photo. Try again."
         setFrames((prev) => prev.filter((frame) => frame.id !== id))
         setGlobalError(message)
+        return false
       }
     },
-    [updateFrame],
+    [],
   )
 
   const handleEnroll = useCallback(
@@ -99,10 +156,20 @@ export function useFaceCapture(
         return
       }
 
-      const frame = frames.find((f) => f.angle === "Front")
+      if (!areAllRequiredAnglesCollected(frames)) {
+        const collected = getCollectedAngleCount(frames)
+        setGlobalError(
+          `Collect all 5 distinct face angles before completing enrollment (${collected}/5 collected).`,
+        )
+        return
+      }
 
-      if (frame?.status !== "ready" || !frame.bbox) {
-        setGlobalError("Capture a clear, front-facing photo.")
+      const orderedFrames = ENROLLMENT_ANGLE_STEPS.map((step) =>
+        frames.find((f) => f.angle === step.angle && isValidCapturedFrame(f)),
+      ).filter((f): f is CapturedFrame => Boolean(f))
+
+      if (orderedFrames.length < ENROLLMENT_ANGLE_STEPS.length) {
+        setGlobalError("All 5 distinct face angle captures are required before enrolling.")
         return
       }
 
@@ -111,30 +178,40 @@ export function useFaceCapture(
       setSuccessMessage(null)
 
       try {
-        const blob = dataUrlToBlob(frame.dataUrl)
+        const payload = orderedFrames.map((frame) => {
+          if (frame.landmarks_5?.length !== 5 || !frame.bbox || !frame.angle) {
+            throw new Error(
+              "Facial features could not be detected for all 5 angles. Please retake affected captures.",
+            )
+          }
+          return {
+            angle: frame.angle,
+            imageData: dataUrlToBlob(frame.dataUrl),
+            bbox: frame.bbox,
+            landmarks_5: frame.landmarks_5,
+            mirrored: false,
+          }
+        })
 
-        if (frame.landmarks_5?.length !== 5) {
-          throw new Error(
-            "Facial features could not be detected. Capture a clear, front-facing photo.",
-          )
-        }
-
-        const result = await attendanceManager.enrollFaceForGroupPerson(
+        const result = await attendanceManager.enrollFaceMultiAngle(
           group.id,
           selectedMemberId,
-          blob,
-          frame.bbox,
-          frame.landmarks_5,
+          payload,
+          { mirrored: false },
         )
 
         if (!result.success) {
-          throw new Error(result.error || "Enrollment failed.")
+          throw new Error(result.error || "Multi-angle enrollment failed.")
         }
 
-        updateFrame(frame.id, (current) => ({
-          ...current,
-          status: "enrolled",
-        }))
+        // Mark enrolled then clear temporary raw camera image data URLs from local state
+        setFrames((prev) =>
+          prev.map((current) => ({
+            ...current,
+            status: "enrolled",
+            dataUrl: "",
+          })),
+        )
 
         const isAlreadyEnrolled = memberStatus.get(selectedMemberId) ?? false
         const member = members.find((m) => m.person_id === selectedMemberId)
@@ -162,7 +239,7 @@ export function useFaceCapture(
         setIsEnrolling(false)
       }
     },
-    [group, frames, members, updateFrame, onRefresh],
+    [group, frames, members, onRefresh],
   )
 
   const handleRemoveFaceData = useCallback(
@@ -211,12 +288,15 @@ export function useFaceCapture(
 
   return {
     frames,
+    currentAngle,
+    setCurrentAngle,
     globalError,
     successMessage,
     isEnrolling,
     setGlobalError,
     setSuccessMessage,
     resetFrames,
+    removeAngleFrame,
     captureProcessedFrame,
     handleEnroll,
     handleRemoveFaceData,

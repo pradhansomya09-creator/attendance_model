@@ -16,6 +16,10 @@ def process_detection(
     if x < 0 or y < 0 or x + w > img_width or y + h > img_height:
         return None
 
+    # Filter out tiny noise / false-positive artifacts below 35px
+    if w < 35 or h < 35:
+        return None
+
     detection = {
         "bbox": {
             "x": float(x),

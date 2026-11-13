@@ -348,6 +348,9 @@ export const getOverlayGuidance = (
   }
 
   if (recognitionEnabled && recognitionResult && !recognitionResult.person_id) {
+    if (face.liveness?.status === "real") {
+      return null
+    }
     return {
       label: "Verifying...",
       subLabel: face.low_light ? "Low light detected" : undefined,

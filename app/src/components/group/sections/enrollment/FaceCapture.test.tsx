@@ -10,6 +10,9 @@ const mocks = vi.hoisted(() => ({
   ui: { enrollmentInfoDismissed: true, setEnrollmentInfoDismissed: vi.fn() },
   capture: {
     frames: [] as CapturedFrame[],
+    currentAngle: "front" as const,
+    setCurrentAngle: vi.fn(),
+    removeAngleFrame: vi.fn(),
     isEnrolling: false,
     successMessage: null,
     globalError: null,
@@ -174,7 +177,7 @@ it.each(["upload", "deselect"])(
   },
 )
 
-it("releases the camera when the captured photo replaces its preview", async () => {
+it("keeps the camera active after partial captures and releases it only once all 5 angles are collected", async () => {
   const { getUserMedia, track, video, props, rerender } = setup()
   await act(async () => {
     await vi.advanceTimersByTimeAsync(100)
@@ -183,12 +186,36 @@ it("releases the camera when the captured photo replaces its preview", async () 
   mocks.capture.frames = [
     {
       id: "photo-1",
+      angle: "front",
+      bbox: [10, 10, 100, 100],
+      landmarks_5: [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]],
       dataUrl: "data:image/jpeg;base64,photo",
       width: 640,
       height: 480,
       status: "ready",
     },
   ]
+  rerender(<FaceCapture {...props} />)
+  expect(screen.queryByText("Photo ready")).not.toBeInTheDocument()
+  expect(screen.getByRole("button", { name: "Capture photo" })).toBeEnabled()
+  expect(track.stop).not.toHaveBeenCalled()
+
+  mocks.capture.frames = [
+    "front",
+    "slight_left",
+    "slight_right",
+    "left_profile",
+    "right_profile",
+  ].map((angle, idx) => ({
+    id: `photo-${idx + 1}`,
+    angle,
+    bbox: [10, 10, 100, 100] as [number, number, number, number],
+    landmarks_5: [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]],
+    dataUrl: "data:image/jpeg;base64,photo",
+    width: 640,
+    height: 480,
+    status: "ready" as const,
+  }))
   rerender(<FaceCapture {...props} />)
   expect(screen.getByText("Photo ready")).toBeVisible()
   expect(track.stop).toHaveBeenCalledTimes(1)

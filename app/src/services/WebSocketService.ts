@@ -15,6 +15,7 @@ export interface WebSocketEventMap {
   config_ack: { success: boolean; timestamp: number }
   pong: { client_id: string; timestamp: number }
   attendance_event: import("../components/main/types").AttendanceEvent
+  cctv_alert: import("../components/main/types").CctvAlertMessage
 }
 
 let activeWebSocketServiceInstance: WebSocketService | null = null
@@ -37,6 +38,7 @@ export class WebSocketService {
     groupId?: string | null
     maxRecognitionFacesPerFrame?: number
     deviceId?: string
+    cameraId?: string | null
   } | null = null
   private statusHandlers = new Set<StatusChangeHandler>()
   private messageHandlers = new Map<keyof WebSocketEventMap, Set<(data: unknown) => void>>()
@@ -86,11 +88,18 @@ export class WebSocketService {
     if (this.token !== null) return this.token
     try {
       const t = await window.electronAPI?.backend?.getToken?.()
-      this.token = typeof t === "string" ? t : ""
+      // Only cache if a real token was returned; leave null so dev mode
+      // reconnects don't get permanently locked to an empty string.
+      if (typeof t === "string" && t.length > 0) {
+        this.token = t
+        return this.token
+      }
+      // No token (dev mode without Electron token injection) — return "" without caching,
+      // so the next connect attempt re-checks (handles backend restarts).
+      return ""
     } catch {
-      this.token = ""
+      return ""
     }
-    return this.token
   }
 
   async connectWebSocket(): Promise<void> {
@@ -210,6 +219,9 @@ export class WebSocketService {
             this.setWebSocketStatus("disconnected")
             this.ws = null
             this.connectPromise = null
+            // Invalidate cached token so the next reconnect always re-fetches
+            // in case the backend restarted and rotated its token.
+            this.token = null
             if (!settled && prevStatus === "connecting") {
               rejectOnce(
                 new Error(
@@ -329,6 +341,7 @@ export class WebSocketService {
     groupId?: string | null
     maxRecognitionFacesPerFrame?: number
     deviceId?: string
+    cameraId?: string | null
   }): void {
     if (!this.isWebSocketReady()) {
       return
@@ -347,6 +360,7 @@ export class WebSocketService {
           max_recognition_faces_per_frame: config.maxRecognitionFacesPerFrame,
         }),
         ...(config.deviceId !== undefined && { device_id: config.deviceId }),
+        ...(config.cameraId !== undefined && { camera_id: config.cameraId }),
       }),
     )
   }
@@ -356,6 +370,7 @@ export class WebSocketService {
     groupId?: string | null
     maxRecognitionFacesPerFrame?: number
     deviceId?: string
+    cameraId?: string | null
   }): void {
     this.pendingLiveConfig = {
       ...(this.pendingLiveConfig ?? {}),

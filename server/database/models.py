@@ -438,6 +438,45 @@ class Face(Base, SyncMixin, DirectorySyncState):
     )
 
 
+class FaceAngleTemplate(Base):
+    """Encrypted per-angle 512-d facial templates stored locally for pose-robust matching."""
+
+    __tablename__ = "face_angle_templates"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    person_id: Mapped[str] = mapped_column(String, nullable=False)
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    angle: Mapped[str] = mapped_column(String, nullable=False)
+    embedding: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    embedding_dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+    yaw: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    pitch: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    clarity_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+    __table_args__ = (
+        Index("ix_face_angle_person", "person_id"),
+        Index(
+            "ux_face_angle_global",
+            "person_id",
+            "angle",
+            unique=True,
+            sqlite_where=text("organization_id IS NULL"),
+        ),
+        Index(
+            "ux_face_angle_org",
+            "person_id",
+            "organization_id",
+            "angle",
+            unique=True,
+            sqlite_where=text("organization_id IS NOT NULL"),
+        ),
+    )
+
+
 class AuditLog(Base):
     """Immutable audit trail for sensitive administrative actions."""
 
@@ -458,6 +497,451 @@ class AuditLog(Base):
     __table_args__ = (
         Index("ix_audit_timestamp", "timestamp"),
         Index("ix_audit_action", "action"),
+    )
+
+
+class CctvCamera(Base):
+    """Registered CCTV, webcam, RTSP, video, or simulated classroom cameras."""
+
+    __tablename__ = "cctv_cameras"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    camera_code: Mapped[str] = mapped_column(String, nullable=False)
+    source_type: Mapped[str] = mapped_column(String, nullable=False, default="webcam")
+    source_uri: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    supports_ir: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    department: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    building: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    classroom: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    assigned_group_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("attendance_groups.id"), nullable=True
+    )
+    backup_camera_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="online")
+    recording_status: Mapped[str] = mapped_column(
+        String, nullable=False, default="idle"
+    )
+    quality_status: Mapped[str] = mapped_column(String, nullable=False, default="green")
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    fps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reconnect_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_frame_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_connected_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+    disconnected_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_cctv_cameras_code", "camera_code"),
+        Index("ix_cctv_cameras_group", "assigned_group_id"),
+        Index("ix_cctv_cameras_org", "organization_id"),
+    )
+
+
+class CctvCameraLog(Base):
+    """Real-time error, disconnect, image quality, and recovery audit log for cameras."""
+
+    __tablename__ = "cctv_camera_logs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    camera_id: Mapped[str] = mapped_column(
+        String, ForeignKey("cctv_cameras.id"), nullable=False
+    )
+    error_category: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str] = mapped_column(String, nullable=False, default="warning")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    recovery_status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending"
+    )
+    corrective_action: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_cctv_camera_logs_camera", "camera_id"),
+        Index("ix_cctv_camera_logs_detected", "detected_at"),
+        Index("ix_cctv_camera_logs_org", "organization_id"),
+    )
+
+
+class AcademicSchedule(Base):
+    """Timetable entry binding department, semester, section, subject, faculty, classroom, and camera."""
+
+    __tablename__ = "academic_schedules"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    group_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("attendance_groups.id"), nullable=True
+    )
+    department: Mapped[str] = mapped_column(String, nullable=False)
+    semester: Mapped[str] = mapped_column(String, nullable=False)
+    section: Mapped[str] = mapped_column(String, nullable=False)
+    subject_code: Mapped[str] = mapped_column(String, nullable=False)
+    subject_name: Mapped[str] = mapped_column(String, nullable=False)
+    faculty_name: Mapped[str] = mapped_column(String, nullable=False)
+    classroom: Mapped[str] = mapped_column(String, nullable=False)
+    building: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    camera_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("cctv_cameras.id"), nullable=True
+    )
+    day_of_week: Mapped[str] = mapped_column(String, nullable=False, default="*")
+    start_time: Mapped[str] = mapped_column(String, nullable=False)
+    end_time: Mapped[str] = mapped_column(String, nullable=False)
+    late_after_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    early_exit_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    min_presence_percent: Mapped[float] = mapped_column(
+        Float, nullable=False, default=60.0
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_academic_schedules_group", "group_id"),
+        Index("ix_academic_schedules_camera", "camera_id"),
+        Index("ix_academic_schedules_section", "department", "semester", "section"),
+        Index("ix_academic_schedules_org", "organization_id"),
+    )
+
+
+class StudentAcademicProfile(Base):
+    """Academic metadata, registration number, and biometric consent preferences per member."""
+
+    __tablename__ = "student_academic_profiles"
+
+    member_id: Mapped[str] = mapped_column(
+        String, ForeignKey("attendance_members.id"), primary_key=True
+    )
+    registration_number: Mapped[str] = mapped_column(String, nullable=False)
+    department: Mapped[str] = mapped_column(String, nullable=False)
+    semester: Mapped[str] = mapped_column(String, nullable=False)
+    section: Mapped[str] = mapped_column(String, nullable=False)
+    biometric_consent_granted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    consent_timestamp: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )
+    non_biometric_opt_out: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_student_profiles_reg_no", "registration_number"),
+        Index("ix_student_profiles_section", "department", "semester", "section"),
+        Index("ix_student_profiles_org", "organization_id"),
+    )
+
+
+class CrossSectionException(Base):
+    """Authorized cross-section attendance arrangement (combined, substitute, inter-section)."""
+
+    __tablename__ = "cross_section_exceptions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    member_id: Mapped[str] = mapped_column(
+        String, ForeignKey("attendance_members.id"), nullable=False
+    )
+    person_id: Mapped[str] = mapped_column(String, nullable=False)
+    from_section: Mapped[str] = mapped_column(String, nullable=False)
+    target_schedule_id: Mapped[str] = mapped_column(
+        String, ForeignKey("academic_schedules.id"), nullable=False
+    )
+    target_section: Mapped[str] = mapped_column(String, nullable=False)
+    exception_type: Mapped[str] = mapped_column(
+        String, nullable=False, default="combined_lecture"
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    authorized_by: Mapped[str] = mapped_column(String, nullable=False)
+    valid_date: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="approved")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_cross_section_member", "member_id"),
+        Index("ix_cross_section_schedule", "target_schedule_id", "valid_date"),
+        Index("ix_cross_section_org", "organization_id"),
+    )
+
+
+class UnknownStudentDetection(Base):
+    """Unidentified face captures queued for authorized identity verification & registration."""
+
+    __tablename__ = "unknown_student_detections"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tracking_id: Mapped[str] = mapped_column(String, nullable=False)
+    camera_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    schedule_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    group_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    classroom: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    frame_snapshot_enc: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    embedding_enc: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    confidence_best_guess: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    resolved_member_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    resolved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_unknown_detections_status", "status"),
+        Index("ix_unknown_detections_detected", "detected_at"),
+        Index("ix_unknown_detections_org", "organization_id"),
+    )
+
+
+class SmartAttendanceEvaluation(Base):
+    """Evidence-based centralized verification result, entry/exit duration, and classification."""
+
+    __tablename__ = "smart_attendance_evaluations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    schedule_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    group_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    camera_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    date: Mapped[str] = mapped_column(String, nullable=False)
+    member_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    person_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    tracking_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    expected_section: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    detected_section: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    classification: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending_verification"
+    )
+    attendance_rule_status: Mapped[str] = mapped_column(
+        String, nullable=False, default="pending_verification"
+    )
+    recognition_confidence: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
+    image_quality_score: Mapped[float] = mapped_column(
+        Float, nullable=False, default=1.0
+    )
+    face_visibility_score: Mapped[float] = mapped_column(
+        Float, nullable=False, default=1.0
+    )
+    temporal_consistency_score: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
+    head_pose_ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    duplicate_flagged: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    estimated_duration_minutes: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
+    observations_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    verified_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_smart_eval_schedule_date", "schedule_id", "date"),
+        Index("ix_smart_eval_group_date", "group_id", "date"),
+        Index("ix_smart_eval_member_date", "member_id", "date"),
+        Index("ix_smart_eval_classification", "classification"),
+        Index("ix_smart_eval_org", "organization_id"),
+    )
+
+
+class SectionMismatchAlert(Base):
+    """Unassigned section detection logged for faculty/admin review."""
+
+    __tablename__ = "section_mismatch_alerts"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    member_id: Mapped[str] = mapped_column(String, nullable=False)
+    person_id: Mapped[str] = mapped_column(String, nullable=False)
+    student_name: Mapped[str] = mapped_column(String, nullable=False)
+    registration_number: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    actual_section: Mapped[str] = mapped_column(String, nullable=False)
+    scheduled_section: Mapped[str] = mapped_column(String, nullable=False)
+    schedule_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    camera_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    classroom: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False, default="open")
+    resolved_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_section_mismatch_status", "status"),
+        Index("ix_section_mismatch_schedule", "schedule_id"),
+        Index("ix_section_mismatch_org", "organization_id"),
+    )
+
+
+class VLaserCameraConfig(Base):
+    """Virtual Laser (V-LASER) grid lines and zone boundary configuration per camera/classroom."""
+
+    __tablename__ = "vlaser_camera_configs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    camera_id: Mapped[str] = mapped_column(
+        String, ForeignKey("cctv_cameras.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    classroom: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    grid_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    grid_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    grid_cols: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    grid_color: Mapped[str] = mapped_column(String, nullable=False, default="#00f3ff")
+    grid_opacity: Mapped[float] = mapped_column(Float, nullable=False, default=0.25)
+    lines_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    zones_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+        nullable=False,
+    )
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_vlaser_configs_camera", "camera_id"),
+        Index("ix_vlaser_configs_classroom", "classroom"),
+        Index("ix_vlaser_configs_org", "organization_id"),
+    )
+
+
+class ClassSessionRecording(Base):
+    """Stored CCTV video recording clip for a specific class session."""
+
+    __tablename__ = "class_session_recordings"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    schedule_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("academic_schedules.id", ondelete="SET NULL"), nullable=True
+    )
+    course_code: Mapped[str] = mapped_column(String, nullable=False)
+    course_name: Mapped[str] = mapped_column(String, nullable=False)
+    section: Mapped[str] = mapped_column(String, nullable=False)
+    session_date: Mapped[str] = mapped_column(String, nullable=False)  # YYYY-MM-DD
+    start_time: Mapped[str] = mapped_column(String, nullable=False)  # HH:MM
+    end_time: Mapped[str] = mapped_column(String, nullable=False)  # HH:MM
+    classroom: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    camera_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("cctv_cameras.id", ondelete="SET NULL"), nullable=True
+    )
+    file_path: Mapped[str] = mapped_column(String, nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    format: Mapped[str] = mapped_column(String, nullable=False, default="mp4")
+    status: Mapped[str] = mapped_column(String, nullable=False, default="ready")  # ready, processing, deleted
+    retention_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    created_by: Mapped[str] = mapped_column(String, nullable=False, default="system")
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_recordings_course_section", "course_code", "section", "session_date"),
+        Index("ix_recordings_schedule", "schedule_id"),
+        Index("ix_recordings_status", "status"),
+        Index("ix_recordings_org", "organization_id"),
+    )
+
+
+class AttendanceCorrectionAudit(Base):
+    """Audit log tracking who changed student attendance, when, and the reason."""
+
+    __tablename__ = "attendance_correction_audits"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    recording_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("class_session_recordings.id", ondelete="SET NULL"), nullable=True
+    )
+    schedule_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("academic_schedules.id", ondelete="SET NULL"), nullable=True
+    )
+    member_id: Mapped[str] = mapped_column(
+        String, ForeignKey("attendance_members.id", ondelete="CASCADE"), nullable=False
+    )
+    student_name: Mapped[str] = mapped_column(String, nullable=False)
+    session_date: Mapped[str] = mapped_column(String, nullable=False)
+    previous_status: Mapped[str] = mapped_column(String, nullable=False)
+    new_status: Mapped[str] = mapped_column(String, nullable=False)
+    correction_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    corrected_by: Mapped[str] = mapped_column(String, nullable=False)  # Faculty name/ID
+    corrected_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_attendance_audit_member", "member_id"),
+        Index("ix_attendance_audit_recording", "recording_id"),
+        Index("ix_attendance_audit_date", "session_date"),
+        Index("ix_attendance_audit_org", "organization_id"),
+    )
+
+
+class VideoAccessAudit(Base):
+    """Audit log tracking who played, seeked, or viewed stored class video clips."""
+
+    __tablename__ = "video_access_audits"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    recording_id: Mapped[str] = mapped_column(
+        String, ForeignKey("class_session_recordings.id", ondelete="CASCADE"), nullable=False
+    )
+    accessed_by: Mapped[str] = mapped_column(String, nullable=False)
+    access_type: Mapped[str] = mapped_column(String, nullable=False, default="stream_play")
+    ip_address: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    accessed_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp(), nullable=False
+    )
+    organization_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_video_audit_recording", "recording_id"),
+        Index("ix_video_audit_user", "accessed_by"),
+        Index("ix_video_audit_org", "organization_id"),
     )
 
 

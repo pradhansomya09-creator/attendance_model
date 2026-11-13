@@ -54,7 +54,18 @@ export class HttpClient {
     }
     const scopedHeaders = await withLocalBackendHeaders(headers)
 
-    const response = await fetchWithRetry(url, { ...options, headers: scopedHeaders })
+    let response = await fetchWithRetry(url, { ...options, headers: scopedHeaders })
+
+    if (response.status === 401) {
+      // Token may have rotated upon backend restart; invalidate cache and retry once
+      this.token = null
+      const freshToken = await this.getApiToken()
+      if (freshToken && freshToken !== token) {
+        headers["X-Facenox-Token"] = freshToken
+        const freshScopedHeaders = await withLocalBackendHeaders(headers)
+        response = await fetchWithRetry(url, { ...options, headers: freshScopedHeaders })
+      }
+    }
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
@@ -92,9 +103,10 @@ export class HttpClient {
     })
   }
 
-  async delete<T>(endpoint: string): Promise<T> {
+  async delete<T>(endpoint: string, body?: unknown): Promise<T> {
     return this.request<T>(endpoint, {
       method: "DELETE",
+      body: body ? JSON.stringify(body) : undefined,
     })
   }
 

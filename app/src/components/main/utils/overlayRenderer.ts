@@ -9,6 +9,20 @@ export const clearOverlayRendererCache = () => {
   subLabelOpacityCache.clear()
 }
 
+const isUnknownFace = (
+  recognitionResult: ExtendedFaceRecognitionResponse | null,
+  recognitionEnabled: boolean,
+  enableSpoofDetection: boolean,
+  livenessStatus?: string,
+) => {
+  if (!recognitionEnabled || !recognitionResult) {
+    return false
+  }
+  const hasNoPersonId = !recognitionResult.person_id || recognitionResult.person_id === "unknown"
+  const livenessOk = !enableSpoofDetection || livenessStatus === "real" || !livenessStatus
+  return Boolean(hasNoPersonId && livenessOk)
+}
+
 const getFaceColor = (
   recognitionResult: ExtendedFaceRecognitionResponse | null,
   recognitionEnabled: boolean,
@@ -22,6 +36,10 @@ const getFaceColor = (
 
   if (isRecognized) {
     return "#22d3ee"
+  }
+
+  if (isUnknownFace(recognitionResult, recognitionEnabled, enableSpoofDetection, livenessStatus)) {
+    return "#ef4444"
   }
 
   return "#94a3b8"
@@ -211,6 +229,13 @@ export const drawOverlays = ({
       recognitionResult?.person_id &&
       (!enableSpoofDetection || face.liveness?.status === "real")
 
+    const isUnknownPerson = isUnknownFace(
+      recognitionResult || null,
+      recognitionEnabled,
+      enableSpoofDetection,
+      face.liveness?.status,
+    )
+
     ctx.save()
     ctx.globalAlpha = face.renderOpacity ?? 1
 
@@ -227,6 +252,9 @@ export const drawOverlays = ({
     if (isActuallyRecognized && recognitionResult && quickSettings.showRecognitionNames) {
       label = recognitionResult.name || recognitionResult.person_id || ""
       shouldShowLabel = !!label
+    } else if (isUnknownPerson) {
+      label = "UNKNOWN PERSON"
+      shouldShowLabel = true
     }
 
     if (!shouldShowLabel && enableSpoofDetection && face.overlayGuidance) {

@@ -8,11 +8,14 @@ import {
 } from "@/components/main/utils"
 import { buildCameraConstraints } from "@/utils/cameraConstraints"
 import { useDetectionStore } from "@/components/main/stores"
+import { IP_CAMERA_DEVICE_ID } from "@/components/main/stores/cameraStore"
+import { cctvService } from "@/services/cctvService"
 import type { WebSocketService } from "@/services/WebSocketService"
 import type { DetectionResult } from "@/components/main/types"
 
 interface CameraControlProps {
   videoRef: React.RefObject<HTMLVideoElement | null>
+  ipImageRef?: React.RefObject<HTMLImageElement | null>
   streamRef: React.MutableRefObject<MediaStream | null>
   animationFrameRef: React.MutableRefObject<number | undefined>
   webSocketServiceRef: React.MutableRefObject<WebSocketService | null>
@@ -41,6 +44,8 @@ interface CameraControlProps {
   setError: (msg: string | null) => void
   selectedCamera: string | null
   cameraDevices: MediaDeviceInfo[]
+  ipCameraUrl?: string
+  setActiveIpStreamUrl?: (url: string | null) => void
 
   initializeWebSocket: () => Promise<void>
   getCameraDevices: () => Promise<MediaDeviceInfo[]>
@@ -48,6 +53,7 @@ interface CameraControlProps {
 
 export function useCameraControl({
   videoRef,
+  ipImageRef,
   streamRef,
   animationFrameRef,
   webSocketServiceRef,
@@ -75,6 +81,8 @@ export function useCameraControl({
   setError,
   selectedCamera,
   cameraDevices,
+  ipCameraUrl,
+  setActiveIpStreamUrl,
   initializeWebSocket,
   getCameraDevices,
 }: CameraControlProps) {
@@ -112,6 +120,7 @@ export function useCameraControl({
 
       cleanupStream(streamRef)
       cleanupVideo(videoRef, !forceCleanup)
+      setActiveIpStreamUrl?.(null)
 
       isStreamingRef.current = false
       setIsStreaming(false)
@@ -158,6 +167,7 @@ export function useCameraControl({
       trackingSessionRef,
       lastStopTimeRef,
       detectionInFlightRef,
+      setActiveIpStreamUrl,
     ],
   )
 
@@ -220,6 +230,104 @@ export function useCameraControl({
         webSocketServiceRef.current?.refreshActiveStream()
       }
       if (!isCurrentAttempt()) return
+
+      if (selectedCamera === IP_CAMERA_DEVICE_ID) {
+        const trimmedIpUrl = ipCameraUrl?.trim() ?? ""
+        if (!trimmedIpUrl) {
+          throw new Error("Enter a mobile IP camera URL first.")
+        }
+
+        cleanupStream(streamRef)
+        cleanupVideo(videoRef, true)
+
+        // Pre-validate connectivity, subnet compatibility, and stream endpoint
+        const probeResult = await cctvService.probeIpStream(trimmedIpUrl).catch((err) => {
+          throw new Error(
+            err instanceof Error ? err.message : "Could not connect to Mobile IP Camera.",
+          )
+        })
+
+        const resolvedTargetUrl = probeResult?.resolved_url || trimmedIpUrl
+        const streamUrl = await cctvService.getIpStreamMjpegUrl(resolvedTargetUrl)
+        if (!isCurrentAttempt()) return
+
+        setActiveIpStreamUrl?.(streamUrl)
+
+        const waitForIpImageReady = () => {
+          return new Promise<void>((resolve, reject) => {
+            const deadline = performance.now() + 8_000
+            let attachedImg: HTMLImageElement | null = null
+            let settled = false
+
+            const finish = (fn: () => void) => {
+              if (settled) return
+              settled = true
+              if (attachedImg) {
+                attachedImg.removeEventListener("error", onImgError)
+              }
+              fn()
+            }
+
+            const onImgError = async () => {
+              const diag = await cctvService
+                .getIpStreamDiagnostics(resolvedTargetUrl)
+                .catch(() => null)
+              const msg =
+                diag?.last_error ||
+                (diag?.status ?
+                  `Camera status: ${diag.status}`
+                : "Unable to load frames from Mobile IP Camera. Verify phone app is streaming.")
+              finish(() => reject(new Error(msg)))
+            }
+
+            const checkImageReady = async () => {
+              if (settled) return
+              const img = ipImageRef?.current
+              if (img && attachedImg !== img) {
+                attachedImg?.removeEventListener("error", onImgError)
+                attachedImg = img
+                img.addEventListener("error", onImgError, { once: true })
+              }
+
+              if (!isCurrentAttempt()) {
+                finish(() =>
+                  reject(new Error("Camera startup was cancelled or the camera disconnected.")),
+                )
+              } else if (img && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                finish(resolve)
+              } else if (performance.now() >= deadline) {
+                const diag = await cctvService
+                  .getIpStreamDiagnostics(resolvedTargetUrl)
+                  .catch(() => null)
+                const diagMsg =
+                  diag?.last_error ||
+                  (diag?.subnet_compatible === false ?
+                    "Subnet mismatch: PC and camera are on different networks."
+                  : `Camera (${diag?.status || "NO_FRAMES_RECEIVED"}) did not deliver video frames. Click 'Use Webcam' or verify phone camera app.`)
+                finish(() => reject(new Error(diagMsg)))
+              } else {
+                setTimeout(checkImageReady, 50)
+              }
+            }
+
+            checkImageReady()
+          })
+        }
+
+        await waitForIpImageReady()
+        if (!isCurrentAttempt()) return
+
+        setIsVideoLoading(false)
+        setCameraActive(true)
+        resetFrameCounters(frameCounterRef, skipFramesRef, lastFrameTimestampRef)
+        isScanningRef.current = true
+        backendServiceReadyRef.current = true
+
+        if (webSocketServiceRef.current?.isWebSocketReady()) {
+          processCurrentFrameRef.current()
+        }
+        return
+      }
 
       const freshDevices = await getCameraDevices()
       if (!isCurrentAttempt()) return
@@ -395,6 +503,7 @@ export function useCameraControl({
         cleanupStream(streamRef)
         cleanupVideo(videoRef, true)
       }
+      setActiveIpStreamUrl?.(null)
       setError(errorMessage)
       isStreamingRef.current = false
       isScanningRef.current = false
@@ -430,6 +539,9 @@ export function useCameraControl({
     trackingSessionRef,
     detectionInFlightRef,
     stopCamera,
+    ipImageRef,
+    ipCameraUrl,
+    setActiveIpStreamUrl,
   ])
 
   return {

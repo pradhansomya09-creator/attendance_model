@@ -1,8 +1,9 @@
 import { useCallback, useEffect } from "react"
-import { useCameraStore, useUIStore } from "@/components/main/stores"
+import { IP_CAMERA_DEVICE_ID, useCameraStore, useUIStore } from "@/components/main/stores"
 
 interface UseVideoStreamOptions {
   videoRef: React.RefObject<HTMLVideoElement | null>
+  ipImageRef?: React.RefObject<HTMLImageElement | null>
   canvasRef: React.RefObject<HTMLCanvasElement | null>
   isStreamingRef: React.MutableRefObject<boolean>
   isScanningRef: React.MutableRefObject<boolean>
@@ -15,6 +16,7 @@ interface UseVideoStreamOptions {
 export function useVideoStream(options: UseVideoStreamOptions) {
   const {
     videoRef,
+    ipImageRef,
     canvasRef,
     isStreamingRef,
     isScanningRef,
@@ -27,6 +29,7 @@ export function useVideoStream(options: UseVideoStreamOptions) {
   const {
     cameraDevices,
     selectedCamera,
+    activeIpStreamUrl,
     setCameraDevices,
     setSelectedCamera,
     setIsStreaming,
@@ -39,9 +42,16 @@ export function useVideoStream(options: UseVideoStreamOptions) {
     if (!video) return
 
     const checkVideoState = () => {
-      const hasStream = video.srcObject !== null
-      const isPlaying = !video.paused && !video.ended && video.readyState > 2
-      const shouldBeActive = hasStream && isPlaying
+      const img = ipImageRef?.current
+      const usingIp = Boolean(useCameraStore.getState().activeIpStreamUrl)
+      let shouldBeActive = false
+      if (usingIp) {
+        shouldBeActive = Boolean(img && img.naturalWidth > 0 && img.naturalHeight > 0)
+      } else {
+        const hasStream = video.srcObject !== null
+        const isPlaying = !video.paused && !video.ended && video.readyState > 2
+        shouldBeActive = hasStream && isPlaying
+      }
 
       const prevActive = useCameraStore.getState().cameraActive
       if (prevActive !== shouldBeActive) {
@@ -69,13 +79,20 @@ export function useVideoStream(options: UseVideoStreamOptions) {
 
     const resizeObserver = new ResizeObserver(() => {
       requestAnimationFrame(() => {
-        if (video && videoRectRef.current) {
-          videoRectRef.current = video.getBoundingClientRect()
+        const target =
+          useCameraStore.getState().activeIpStreamUrl && ipImageRef?.current ?
+            ipImageRef.current
+          : video
+        if (target && videoRectRef.current) {
+          videoRectRef.current = target.getBoundingClientRect()
           lastVideoRectUpdateRef.current = Date.now()
         }
       })
     })
     resizeObserver.observe(video)
+    if (ipImageRef?.current) {
+      resizeObserver.observe(ipImageRef.current)
+    }
 
     return () => {
       events.forEach((event) => {
@@ -85,6 +102,8 @@ export function useVideoStream(options: UseVideoStreamOptions) {
       resizeObserver.disconnect()
     }
   }, [
+    activeIpStreamUrl,
+    ipImageRef,
     isScanningRef,
     isStartingRef,
     isStreamingRef,
@@ -97,13 +116,19 @@ export function useVideoStream(options: UseVideoStreamOptions) {
 
   const captureFrame = useCallback((): Promise<ArrayBuffer | null> => {
     const video = videoRef.current
+    const img = ipImageRef?.current
     const canvas = canvasRef.current
+    const usingIp = Boolean(useCameraStore.getState().activeIpStreamUrl)
 
-    if (!video || !canvas) {
+    if (!canvas) {
       return Promise.resolve(null)
     }
 
-    if (video.videoWidth === 0 || video.videoHeight === 0) {
+    const sourceWidth = usingIp ? (img?.naturalWidth ?? 0) : (video?.videoWidth ?? 0)
+    const sourceHeight = usingIp ? (img?.naturalHeight ?? 0) : (video?.videoHeight ?? 0)
+    const sourceEl = usingIp ? img : video
+
+    if (!sourceEl || sourceWidth === 0 || sourceHeight === 0) {
       return Promise.resolve(null)
     }
 
@@ -115,14 +140,14 @@ export function useVideoStream(options: UseVideoStreamOptions) {
       return Promise.resolve(null)
     }
 
-    if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
+    if (canvas.width !== sourceWidth || canvas.height !== sourceHeight) {
+      canvas.width = sourceWidth
+      canvas.height = sourceHeight
     }
 
     return new Promise((resolve) => {
       try {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+        ctx.drawImage(sourceEl, 0, 0, canvas.width, canvas.height)
         canvas.toBlob(
           (blob) => {
             if (!blob) {
@@ -143,7 +168,7 @@ export function useVideoStream(options: UseVideoStreamOptions) {
         resolve(null)
       }
     })
-  }, [videoRef, canvasRef])
+  }, [videoRef, ipImageRef, canvasRef])
 
   const getCameraDevices = useCallback(async (): Promise<MediaDeviceInfo[]> => {
     try {
@@ -167,7 +192,7 @@ export function useVideoStream(options: UseVideoStreamOptions) {
       const activeCameraId = useCameraStore.getState().selectedCamera
       const isStreaming = useCameraStore.getState().isStreaming
 
-      if (isStreaming && activeCameraId) {
+      if (isStreaming && activeCameraId && activeCameraId !== IP_CAMERA_DEVICE_ID) {
         const stillExists = refreshedDevices.some((device) => device.deviceId === activeCameraId)
         if (!stillExists) {
           setError("Active camera disconnected. Select a different camera or reconnect the device.")

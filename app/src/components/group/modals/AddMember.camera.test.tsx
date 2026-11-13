@@ -40,6 +40,7 @@ vi.mock("@/services", () => ({
     addMember: vi.fn(),
     addMembersBulk: vi.fn(),
     enrollFaceForGroupPerson: vi.fn(),
+    enrollFaceMultiAngle: vi.fn(),
   },
   backendService: { detectFaces: vi.fn() },
   persistentSettings: {
@@ -104,6 +105,10 @@ beforeEach(() => {
     createAttendanceMember({ name: "Alice", has_face_data: false }),
   )
   vi.mocked(attendanceManager.enrollFaceForGroupPerson).mockResolvedValue({ success: true })
+  vi.mocked(attendanceManager.enrollFaceMultiAngle).mockResolvedValue({
+    success: true,
+    angle_count: 5,
+  })
 })
 
 afterEach(() => {
@@ -305,13 +310,19 @@ it("allows a remaining row to be corrected to the same name as an already-added 
   expect(calls[1][0][0].creationId).toBe(calls[0][0][1].creationId)
 })
 
+async function captureAllFiveAngles() {
+  for (let i = 0; i < 5; i += 1) {
+    fireEvent.click(screen.getByRole("button", { name: "Capture photo" }))
+    await advance(50)
+  }
+}
+
 async function prepareFace() {
   const view = setup()
   fireEvent.change(screen.getByPlaceholderText("Name"), { target: { value: "Alice" } })
   fireEvent.click(screen.getByRole("button", { name: "+ Enroll now" }))
   await advance()
-  fireEvent.click(screen.getByRole("button", { name: "Capture photo" }))
-  await advance()
+  await captureAllFiveAngles()
   return view
 }
 
@@ -320,11 +331,11 @@ it.each(["failure response", "exception"])(
   async (failure) => {
     const { props, rerender } = await prepareFace()
     if (failure === "exception")
-      vi.mocked(attendanceManager.enrollFaceForGroupPerson).mockRejectedValueOnce(
+      vi.mocked(attendanceManager.enrollFaceMultiAngle).mockRejectedValueOnce(
         new Error("Storage unavailable"),
       )
     else
-      vi.mocked(attendanceManager.enrollFaceForGroupPerson).mockResolvedValueOnce({
+      vi.mocked(attendanceManager.enrollFaceMultiAngle).mockResolvedValueOnce({
         success: false,
         error: "Storage unavailable",
       })
@@ -332,7 +343,7 @@ it.each(["failure response", "exception"])(
     await advance()
     expect(screen.getByRole("alert")).toHaveTextContent("Member added, but face enrollment failed")
     expect(screen.getByRole("alert")).toHaveTextContent("Storage unavailable")
-    expect(screen.getByText("Photo ready")).toBeVisible()
+    expect(screen.getByText("5/5 face angles ready")).toBeVisible()
     expect(screen.getByPlaceholderText("Name")).toBeDisabled()
     expect(props.onClose).not.toHaveBeenCalled()
     expect(props.onSuccess).toHaveBeenCalledTimes(1)
@@ -341,8 +352,8 @@ it.each(["failure response", "exception"])(
     fireEvent.click(screen.getByRole("button", { name: "Retry face enrollment" }))
     await advance()
     expect(attendanceManager.addMember).toHaveBeenCalledTimes(1)
-    expect(attendanceManager.enrollFaceForGroupPerson).toHaveBeenCalledTimes(2)
-    const calls = vi.mocked(attendanceManager.enrollFaceForGroupPerson).mock.calls
+    expect(attendanceManager.enrollFaceMultiAngle).toHaveBeenCalledTimes(2)
+    const calls = vi.mocked(attendanceManager.enrollFaceMultiAngle).mock.calls
     expect(calls[0][1]).toBe(calls[1][1])
     const cached = useGroupStore.getState().members.filter((item) => item.id === member.id)
     expect(cached).toHaveLength(1)
@@ -355,7 +366,7 @@ it.each(["finish", "remove and done"])(
   "can %s after a partial save without creating another member",
   async (action) => {
     const { props } = await prepareFace()
-    vi.mocked(attendanceManager.enrollFaceForGroupPerson).mockResolvedValueOnce({
+    vi.mocked(attendanceManager.enrollFaceMultiAngle).mockResolvedValueOnce({
       success: false,
       error: "Failed",
     })
@@ -370,7 +381,7 @@ it.each(["finish", "remove and done"])(
     }
     await advance()
     expect(attendanceManager.addMember).toHaveBeenCalledTimes(1)
-    expect(attendanceManager.enrollFaceForGroupPerson).toHaveBeenCalledTimes(1)
+    expect(attendanceManager.enrollFaceMultiAngle).toHaveBeenCalledTimes(1)
     expect(props.onClose).toHaveBeenCalledTimes(1)
   },
 )
@@ -387,7 +398,7 @@ it("reuses the creation token when retrying an unresolved creation request", asy
   expect(calls).toHaveLength(2)
   expect(calls[0][2]?.creationId).toEqual(expect.any(String))
   expect(calls[0][2]?.creationId).toBe(calls[1][2]?.creationId)
-  expect(attendanceManager.enrollFaceForGroupPerson).toHaveBeenCalledTimes(1)
+  expect(attendanceManager.enrollFaceMultiAngle).toHaveBeenCalledTimes(1)
 })
 
 it.each(["success", "failure"])(
@@ -444,7 +455,7 @@ it.each(["success", "failure"])(
 it("ignores a late face-enrollment result after closing and reopening", async () => {
   const { props, rerender } = await prepareFace()
   let resolve!: (value: { success: boolean }) => void
-  vi.mocked(attendanceManager.enrollFaceForGroupPerson).mockImplementationOnce(
+  vi.mocked(attendanceManager.enrollFaceMultiAngle).mockImplementationOnce(
     () =>
       new Promise((done) => {
         resolve = done
@@ -546,11 +557,9 @@ it("waits for a delayed preview mount, stays stopped after capture, and restarts
   rerender(<AddMember {...props} />)
   await advance()
   expect(getUserMedia).toHaveBeenCalledTimes(1)
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Capture photo" }))
-  })
+  await captureAllFiveAngles()
   await advance(5000)
-  expect(screen.getByText("Photo ready")).toBeVisible()
+  expect(screen.getByText("5/5 face angles ready")).toBeVisible()
   expect(screen.getByRole("button", { name: "Add member & enroll face" })).toBeEnabled()
   expect(attendanceManager.addMember).not.toHaveBeenCalled()
   expect(getUserMedia).toHaveBeenCalledTimes(1)
@@ -618,7 +627,7 @@ it("requires a photo or an explicit skip in both camera and upload modes, includ
     const submit = screen.getByRole("button", { name: "Add member" })
     expect(submit).toBeDisabled()
     expect(document.getElementById(submit.getAttribute("aria-describedby")!)).toHaveTextContent(
-      "Capture or upload a photo",
+      "Capture or upload all 5 distinct face angles",
     )
     fireEvent.click(submit)
     fireEvent.keyDown(name, { key: "Enter" })
@@ -632,15 +641,21 @@ it("requires a photo or an explicit skip in both camera and upload modes, includ
   fireEvent.click(screen.getByRole("button", { name: "Add member" }))
   await advance()
   expect(attendanceManager.addMember).toHaveBeenCalledTimes(1)
-  expect(attendanceManager.enrollFaceForGroupPerson).not.toHaveBeenCalled()
+  expect(attendanceManager.enrollFaceMultiAngle).not.toHaveBeenCalled()
   expect(props.onSuccess).toHaveBeenCalledTimes(1)
 })
 
-it("blocks processing submissions and adds the captured face only on Add member & enroll face", async () => {
+it("blocks processing submissions until all 5 distinct angles are captured and enrolls on Add member & enroll face", async () => {
   setup()
   fireEvent.change(screen.getByPlaceholderText("Name"), { target: { value: "Alice" } })
   fireEvent.click(screen.getByRole("button", { name: "+ Enroll now" }))
   await advance()
+  for (let i = 0; i < 4; i += 1) {
+    fireEvent.click(screen.getByRole("button", { name: "Capture photo" }))
+    await advance(50)
+  }
+  expect(screen.getByRole("button", { name: "Add member" })).toBeDisabled()
+
   let resolve!: (value: typeof faceDetectionResult) => void
   vi.mocked(backendService.detectFaces).mockImplementationOnce(
     () =>
@@ -650,7 +665,7 @@ it("blocks processing submissions and adds the captured face only on Add member 
   )
   fireEvent.click(screen.getByRole("button", { name: "Capture photo" }))
   expect(screen.getByRole("button", { name: "Add member" })).toBeDisabled()
-  expect(screen.getByText("Checking your photo before enrollment.")).toBeVisible()
+  expect(screen.getByText("Checking angle clarity & landmarks before saving.")).toBeVisible()
   fireEvent.keyDown(screen.getByPlaceholderText("Name"), { key: "Enter" })
   await advance()
   expect(attendanceManager.addMember).not.toHaveBeenCalled()
@@ -661,12 +676,23 @@ it("blocks processing submissions and adds the captured face only on Add member 
   fireEvent.click(screen.getByRole("button", { name: "Add member & enroll face" }))
   await advance()
   expect(attendanceManager.addMember).toHaveBeenCalledTimes(1)
-  expect(attendanceManager.enrollFaceForGroupPerson).toHaveBeenCalledTimes(1)
-  expect(vi.mocked(attendanceManager.enrollFaceForGroupPerson).mock.calls[0].slice(2)).toEqual([
-    "data:image/jpeg;base64,YQ==",
-    faceDetectionResult.faces[0].bbox,
-    faceDetectionResult.faces[0].landmarks_5,
+  expect(attendanceManager.enrollFaceMultiAngle).toHaveBeenCalledTimes(1)
+  const captures = vi.mocked(attendanceManager.enrollFaceMultiAngle).mock.calls[0][2]
+  expect(captures).toHaveLength(5)
+  expect(captures.map((c) => c.angle)).toEqual([
+    "front",
+    "slight_left",
+    "slight_right",
+    "left_profile",
+    "right_profile",
   ])
+  expect(captures[0]).toEqual({
+    angle: "front",
+    imageData: "data:image/jpeg;base64,YQ==",
+    bbox: faceDetectionResult.faces[0].bbox,
+    landmarks_5: faceDetectionResult.faces[0].landmarks_5,
+    mirrored: false,
+  })
 })
 
 it.each(["camera", "upload"])(

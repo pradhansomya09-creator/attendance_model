@@ -348,6 +348,97 @@ async def enroll_member_for_group_person(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+@router.post("/{group_id}/persons/{person_id}/enroll-multi-angle")
+async def enroll_member_multi_angle_for_group_person(
+    group_id: str,
+    person_id: str,
+    images: List[UploadFile] = File(...),
+    metadata: str = Form(...),
+    repo: AttendanceRepository = Depends(get_repository),
+):
+    """Enroll >=5 distinct facial angles locally into unified & encrypted per-angle templates."""
+    try:
+        from core.lifespan import face_recognizer
+        import json
+        import numpy as np
+        import cv2
+
+        try:
+            meta_payload = json.loads(metadata)
+            if isinstance(meta_payload, dict):
+                captures_meta = meta_payload.get("captures") or []
+                default_mirrored = bool(meta_payload.get("mirrored", False))
+            elif isinstance(meta_payload, list):
+                captures_meta = meta_payload
+                default_mirrored = False
+            else:
+                raise ValueError("Metadata must be an object or array")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid metadata format: {e}")
+
+        if len(images) < 5 or len(captures_meta) < 5 or len(images) != len(captures_meta):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Multi-angle enrollment requires at least 5 matching images and angle metadata entries "
+                    f"(got {len(images)} images, {len(captures_meta)} metadata items)."
+                ),
+            )
+
+        captures = []
+        try:
+            for idx, (upload, cap_meta) in enumerate(zip(images, captures_meta)):
+                if not isinstance(cap_meta, dict) or not cap_meta.get("angle"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Missing angle specifier for capture #{idx + 1}.",
+                    )
+                contents = await upload.read()
+                if len(contents) > MAX_IMAGE_SIZE:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Image #{idx + 1} too large ({len(contents)} bytes). Max {MAX_IMAGE_SIZE} bytes.",
+                    )
+                nparr = np.frombuffer(contents, np.uint8)
+                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to decode capture image #{idx + 1}.",
+                    )
+                captures.append(
+                    {
+                        "angle": cap_meta.get("angle"),
+                        "bbox": cap_meta.get("bbox"),
+                        "landmarks_5": cap_meta.get("landmarks_5"),
+                        "mirrored": bool(cap_meta.get("mirrored", default_mirrored)),
+                        "image": img,
+                    }
+                )
+
+            service = AttendanceService(repo, face_recognizer=face_recognizer)
+            try:
+                return await service.enroll_member_multi_angle(
+                    group_id, person_id, captures, mirrored=default_mirrored
+                )
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+            except ValueError as e:
+                if "not found" in str(e).lower():
+                    raise HTTPException(status_code=404, detail=str(e))
+                raise HTTPException(status_code=400, detail=str(e))
+        finally:
+            for item in captures:
+                item.pop("image", None)
+            captures.clear()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error enrolling multi-angle face for group person: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
 @router.delete("/{group_id}/persons/{person_id}/face-data")
 async def remove_face_data_for_group_person(
     group_id: str,

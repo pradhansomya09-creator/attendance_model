@@ -62,6 +62,7 @@ class FaceRecognizer:
 
         self._db_managers: Dict[str, FaceDatabaseManager] = {}
         self._persons_cache: Dict[str, Dict[str, np.ndarray]] = {}
+        self._template_bank_cache: Dict[str, Tuple[List[str], Optional[np.ndarray]]] = {}
         self._cache_timestamp: Dict[str, float] = {}
         self._cache_ttl = (
             60.0  # Increased from 1.0 to reduce DB load during recognition
@@ -145,6 +146,34 @@ class FaceRecognizer:
 
         return normalize_embeddings_batch(embeddings)
 
+    def _template_bank_store(
+        self,
+    ) -> Dict[str, Tuple[List[str], Optional[np.ndarray]]]:
+        store = getattr(self, "_template_bank_cache", None)
+        if store is None:
+            store = {}
+            self._template_bank_cache = store
+        return store
+
+    async def _load_template_bank(
+        self, db_manager: Optional[FaceDatabaseManager]
+    ) -> Tuple[List[str], Optional[np.ndarray]]:
+        if not db_manager:
+            return [], None
+        person_ids, vectors = await db_manager.get_all_template_entries()
+        if not vectors:
+            return [], None
+        expected_dim = len(vectors[0])
+        filtered_ids: List[str] = []
+        filtered_vecs: List[np.ndarray] = []
+        for pid, vec in zip(person_ids, vectors):
+            if len(vec) == expected_dim:
+                filtered_ids.append(pid)
+                filtered_vecs.append(vec)
+        if not filtered_vecs:
+            return [], None
+        return filtered_ids, np.stack(filtered_vecs)
+
     async def _get_database(
         self, organization_id: Optional[str] = None
     ) -> Dict[str, np.ndarray]:
@@ -158,6 +187,7 @@ class FaceRecognizer:
         if cache_key not in self._cache_locks:
             self._cache_locks[cache_key] = asyncio.Lock()
 
+        bank_store = self._template_bank_store()
         async with self._cache_locks[cache_key]:
             current_time = time.time()
             cache_timestamp = self._cache_timestamp.get(cache_key, 0)
@@ -168,11 +198,21 @@ class FaceRecognizer:
                 db_manager = self._get_db_manager(organization_id)
                 if db_manager:
                     self._persons_cache[cache_key] = await db_manager.get_all_persons()
+                    bank_store[cache_key] = await self._load_template_bank(db_manager)
                 else:
                     self._persons_cache[cache_key] = {}
+                    bank_store[cache_key] = ([], None)
                 self._cache_timestamp[cache_key] = current_time
 
             return self._persons_cache[cache_key]
+
+    async def export_template_bank(
+        self, organization_id: Optional[str] = None
+    ) -> Tuple[List[str], Optional[np.ndarray]]:
+        """Return multi-angle template matrix and aligned person_id list for org scope."""
+        await self._get_database(organization_id)
+        cache_key = self._cache_key(organization_id)
+        return self._template_bank_store().get(cache_key, ([], None))
 
     async def _find_best_match(
         self,
@@ -195,6 +235,12 @@ class FaceRecognizer:
         if not database and prebuilt_matrix is None:
             return None, 0.0
 
+        if prebuilt_matrix is None:
+            bank_ids, bank_matrix = await self.export_template_bank(organization_id)
+            if bank_matrix is not None and bank_ids:
+                prebuilt_matrix = bank_matrix
+                person_index_map = bank_ids
+
         return find_best_match(
             embedding,
             database,
@@ -209,14 +255,17 @@ class FaceRecognizer:
         cache_key = self._cache_key(organization_id)
         if cache_key not in self._cache_locks:
             self._cache_locks[cache_key] = asyncio.Lock()
+        bank_store = self._template_bank_store()
         # An older cache load must finish before publishing the post-write state.
         async with self._cache_locks[cache_key]:
             db_manager = self._get_db_manager(organization_id)
             if db_manager:
                 self._persons_cache[cache_key] = await db_manager.get_all_persons()
+                bank_store[cache_key] = await self._load_template_bank(db_manager)
                 self._cache_timestamp[cache_key] = time.time()
             else:
                 self._persons_cache.pop(cache_key, None)
+                bank_store.pop(cache_key, None)
                 self._cache_timestamp.pop(cache_key, None)
 
         try:
@@ -294,6 +343,13 @@ class FaceRecognizer:
                 raise ValueError("Failed to extract embeddings for all faces")
 
             database = await self._get_database(organization_id)
+            if prebuilt_matrix is None:
+                bank_ids, bank_matrix = await self.export_template_bank(
+                    organization_id
+                )
+                if bank_matrix is not None and bank_ids:
+                    prebuilt_matrix = bank_matrix
+                    person_index_map = bank_ids
             matches = find_best_matches_batch(
                 query_embeddings=embeddings,
                 database=database,
@@ -378,6 +434,135 @@ class FaceRecognizer:
 
         except Exception as e:
             logger.error(f"Person enrollment failed: {e}")
+            return {"success": False, "error": str(e), "person_id": person_id}
+
+    async def enroll_person_multi_angle(
+        self,
+        person_id: str,
+        samples: List[Dict[str, Any]],
+        organization_id: Optional[str] = None,
+        min_consistency_similarity: float = 0.25,
+    ) -> Dict[str, Any]:
+        """Extract 512-d embeddings for >=5 angles, verify identity consistency, fuse & persist encrypted."""
+        try:
+            if len(samples) < 5:
+                return {
+                    "success": False,
+                    "person_id": person_id,
+                    "error": f"At least 5 distinct face angle captures are required (got {len(samples)}).",
+                }
+
+            db_manager = self._get_db_manager(organization_id)
+            if not db_manager:
+                return {
+                    "success": False,
+                    "person_id": person_id,
+                    "database_saved": False,
+                    "error": "Face storage is unavailable. Please restart Facenox and try again.",
+                }
+
+            extracted_vectors: List[np.ndarray] = []
+            template_records: List[Dict[str, Any]] = []
+            weights: List[float] = []
+            front_vec: Optional[np.ndarray] = None
+
+            for sample in samples:
+                face_data = [{"landmarks_5": sample["landmarks_5"]}]
+                embeddings = await self._extract_embeddings(sample["image"], face_data)
+                if not embeddings:
+                    return {
+                        "success": False,
+                        "person_id": person_id,
+                        "error": f"Failed to extract facial features for angle '{sample['angle']}'.",
+                    }
+                vec = embeddings[0].astype(np.float32)
+                norm = float(np.linalg.norm(vec))
+                if norm > 0:
+                    vec = vec / norm
+
+                angle = str(sample["angle"])
+                clarity = float(sample.get("clarity_score", 0.5))
+                if angle == "front":
+                    front_vec = vec
+                    weight = max(0.45, clarity) * 1.25
+                elif angle in ("slight_left", "slight_right"):
+                    weight = max(0.35, clarity) * 1.0
+                else:
+                    weight = max(0.30, clarity) * 0.85
+
+                extracted_vectors.append(vec)
+                weights.append(weight)
+                template_records.append(
+                    {
+                        "angle": angle,
+                        "embedding": vec,
+                        "yaw": float(sample.get("yaw", 0.0)),
+                        "pitch": float(sample.get("pitch", 0.0)),
+                        "clarity_score": clarity,
+                    }
+                )
+
+            # Pairwise / centroid consistency check so someone cannot mix two people across 5 shots
+            stacked = np.stack(extracted_vectors)
+            weight_arr = np.asarray(weights, dtype=np.float32)[:, None]
+            fused = np.sum(stacked * weight_arr, axis=0)
+            fused_norm = float(np.linalg.norm(fused))
+            if fused_norm <= 0:
+                return {
+                    "success": False,
+                    "person_id": person_id,
+                    "error": "Invalid facial template norm computed during fusion.",
+                }
+            fused = (fused / fused_norm).astype(np.float32)
+
+            ref_vec = front_vec if front_vec is not None else fused
+            for idx, vec in enumerate(extracted_vectors):
+                sim_centroid = float(np.dot(vec, fused))
+                sim_ref = float(np.dot(vec, ref_vec))
+                if sim_centroid < min_consistency_similarity and sim_ref < min_consistency_similarity:
+                    return {
+                        "success": False,
+                        "person_id": person_id,
+                        "error": (
+                            f"Captured image for '{template_records[idx]['angle']}' does not match "
+                            "the same person as the other captures. Please recapture clearly."
+                        ),
+                    }
+
+            from utils.image_utils import calculate_image_hash
+
+            primary_img = next(
+                (s["image"] for s in samples if s["angle"] == "front"),
+                samples[0]["image"],
+            )
+            image_hash = calculate_image_hash(primary_img)
+
+            save_fused = await db_manager.add_person(person_id, fused, image_hash)
+            save_angles = await db_manager.save_angle_templates(
+                person_id, template_records
+            )
+            if not save_fused or not save_angles:
+                return {
+                    "success": False,
+                    "person_id": person_id,
+                    "database_saved": False,
+                    "error": "Failed to persist encrypted multi-angle face templates.",
+                }
+
+            stats = await db_manager.get_stats()
+            total_persons = stats.get("total_persons", 0)
+            await self._refresh_cache(organization_id)
+
+            return {
+                "success": True,
+                "person_id": person_id,
+                "database_saved": True,
+                "angles_enrolled": [r["angle"] for r in template_records],
+                "angle_count": len(template_records),
+                "total_persons": total_persons,
+            }
+        except Exception as e:
+            logger.error(f"Multi-angle person enrollment failed: {e}")
             return {"success": False, "error": str(e), "person_id": person_id}
 
     async def remove_person(

@@ -12,6 +12,8 @@ import type { AttendanceGroup } from "@/types/recognition"
 
 interface VideoCanvasProps {
   videoRef: RefObject<HTMLVideoElement | null>
+  ipImageRef?: RefObject<HTMLImageElement | null>
+  activeIpStreamUrl?: string | null
   canvasRef: RefObject<HTMLCanvasElement | null>
   overlayCanvasRef: RefObject<HTMLCanvasElement | null>
   quickSettings: QuickSettings
@@ -34,6 +36,8 @@ interface VideoCanvasProps {
 
 export const VideoCanvas = memo(function VideoCanvas({
   videoRef,
+  ipImageRef,
+  activeIpStreamUrl = null,
   canvasRef,
   overlayCanvasRef,
   quickSettings,
@@ -236,11 +240,24 @@ export const VideoCanvas = memo(function VideoCanvas({
         className={`absolute inset-0 h-full w-full bg-[var(--bg-canvas)] ${
           quickSettings.cameraFitCover ? "object-cover" : "object-contain"
         } transition-opacity duration-300 ${
-          isStreaming && !isVideoLoading ? "opacity-100" : "opacity-0"
-        } ${quickSettings.cameraMirrored ? "scale-x-[-1]" : ""}`}
+          !activeIpStreamUrl && isStreaming && !isVideoLoading ? "opacity-100" : "opacity-0"
+        } ${activeIpStreamUrl ? "pointer-events-none" : ""} ${quickSettings.cameraMirrored ? "scale-x-[-1]" : ""}`}
         playsInline
         muted
       />
+      {activeIpStreamUrl && (
+        <img
+          ref={ipImageRef}
+          src={activeIpStreamUrl}
+          crossOrigin="anonymous"
+          alt="Mobile IP camera live stream"
+          className={`absolute inset-0 h-full w-full bg-[var(--bg-canvas)] ${
+            quickSettings.cameraFitCover ? "object-cover" : "object-contain"
+          } transition-opacity duration-300 ${
+            isStreaming && !isVideoLoading ? "opacity-100" : "opacity-0"
+          } ${quickSettings.cameraMirrored ? "scale-x-[-1]" : ""}`}
+        />
+      )}
       <canvas
         ref={overlayCanvasRef}
         role="img"
@@ -341,7 +358,7 @@ export const VideoCanvas = memo(function VideoCanvas({
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.2 }}
-            className="absolute top-4 right-4 z-50 h-7 w-7"
+            className="absolute top-2.5 right-2.5 z-30 h-7 w-7"
             onMouseEnter={() => setShowSettings(true)}
             onMouseLeave={() => setShowSettings(false)}>
             <div

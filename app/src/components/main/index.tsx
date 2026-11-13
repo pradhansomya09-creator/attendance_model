@@ -1,7 +1,8 @@
-import { useEffect, useRef, useCallback } from "react"
+import { useEffect, useRef, useCallback, useState } from "react"
 import { AnimatePresence } from "framer-motion"
 import { AlertTriangle } from "lucide-react"
 import { attendanceManager, WebSocketService } from "@/services"
+import { cctvService } from "@/services/cctvService"
 import {
   useStreamState,
   useVideoStream,
@@ -25,6 +26,7 @@ import {
   useAttendanceStore,
   useUIStore,
 } from "@/components/main/stores"
+import { IP_CAMERA_DEVICE_ID } from "@/components/main/stores/cameraStore"
 import { useGroupStore, useGroupUIStore } from "@/components/group/stores"
 import { FloatingAlert } from "@/components/common"
 
@@ -33,6 +35,9 @@ import { VideoCanvas } from "@/components/main/components/VideoCanvas"
 import { Sidebar } from "@/components/main/components/Sidebar"
 import { MainModals } from "@/components/main/components/MainModals"
 import { CooldownOverlay } from "@/components/main/components/CooldownOverlay"
+import { CctvStatusHud, type SmartCctvTab, type ViewportMode } from "@/components/cctv/CctvStatusHud"
+import { SmartCctvHub } from "@/components/cctv/SmartCctvHub"
+import { VLaserEditorModal, VLaserLiveCanvas } from "@/components/cctv/vlaser"
 import type { DetectionResult } from "@/components/main/types"
 import { soundEffects } from "@/services/SoundEffectsService"
 import { consumeClockWarning, type ClockWarningDetail } from "@/services/clockWarnings"
@@ -42,7 +47,12 @@ let globalStopCamera: ((forceCleanup: boolean) => void) | null = null
 
 export default function Main() {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const ipImageRef = useRef<HTMLImageElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [showCctvHub, setShowCctvHub] = useState(false)
+  const [cctvInitialTab, setCctvInitialTab] = useState<SmartCctvTab>("faculty")
+  const [showVLaserModal, setShowVLaserModal] = useState(false)
+  const [viewportMode, setViewportMode] = useState<ViewportMode>("split")
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const animationFrameRef = useRef<number | undefined>(undefined)
@@ -80,12 +90,18 @@ export default function Main() {
     cameraDevices,
     selectedCamera,
     setSelectedCamera,
+    ipCameraUrl,
+    activeIpStreamUrl,
+    setIpCameraUrl,
+    setActiveIpStreamUrl,
   } = useCameraStore()
 
   const {
     currentDetections,
     trackedFaces,
     currentRecognitionResults: rawCurrentRecognitionResults,
+    activeCctvCameraId,
+    setActiveCctvCameraId,
   } = useDetectionStore()
 
   const {
@@ -130,6 +146,25 @@ export default function Main() {
   const showEditMemberModal = useGroupUIStore((state) => state.showEditMemberModal)
   const showCreateGroupModal = useGroupUIStore((state) => state.showCreateGroupModal)
   const showEditGroupModal = useGroupUIStore((state) => state.showEditGroupModal)
+
+  const handleOpenCctvHub = useCallback((initialTab?: SmartCctvTab) => {
+    setCctvInitialTab(initialTab ?? "faculty")
+    setShowCctvHub(true)
+  }, [])
+
+  const handleOpenVLaser = useCallback(async () => {
+    if (!activeCctvCameraId) {
+      try {
+        const cams = await cctvService.listCameras()
+        if (cams && cams.length > 0) {
+          setActiveCctvCameraId(cams[0].id)
+        }
+      } catch {
+        // Non-critical fallback
+      }
+    }
+    setShowVLaserModal(true)
+  }, [activeCctvCameraId, setActiveCctvCameraId])
 
   // Auto-open Settings → Sync when user chose "Connect to Cloud" during onboarding
   const hasCheckedCloudSetupRef = useRef(false)
@@ -225,6 +260,7 @@ export default function Main() {
 
   const { captureFrame, getCameraDevices } = useVideoStream({
     videoRef,
+    ipImageRef,
     canvasRef,
     isStreamingRef,
     isScanningRef,
@@ -259,6 +295,7 @@ export default function Main() {
 
   const { animate, resetOverlayRefs } = useOverlayRendering({
     videoRef,
+    ipImageRef,
     overlayCanvasRef,
     animationFrameRef,
     videoRectRef,
@@ -291,6 +328,7 @@ export default function Main() {
 
   const { startCamera, stopCamera } = useCameraControl({
     videoRef,
+    ipImageRef,
     streamRef,
     animationFrameRef,
     webSocketServiceRef,
@@ -318,6 +356,8 @@ export default function Main() {
     setError,
     selectedCamera,
     cameraDevices,
+    ipCameraUrl,
+    setActiveIpStreamUrl,
     initializeWebSocket,
     getCameraDevices,
   })
@@ -342,14 +382,19 @@ export default function Main() {
     }
   }, [attendanceGroups.length, isShellReady, setShowGroupManagement, setSidebarCollapsed])
 
-  const scanReadiness = getScanReadiness(useAttendanceStore.getState(), cameraDevices.length > 0)
+  const hasCameraSource =
+    cameraDevices.length > 0 ||
+    (selectedCamera === IP_CAMERA_DEVICE_ID && Boolean(ipCameraUrl?.trim()))
+  const scanReadiness = getScanReadiness(useAttendanceStore.getState(), hasCameraSource)
   const isGroupDataLoading = isPanelLoading || isPanelSwitchPending
 
   const startCameraGuarded = useCallback(() => {
-    const readiness = getScanReadiness(
-      useAttendanceStore.getState(),
-      useCameraStore.getState().cameraDevices.length > 0,
-    )
+    const cameraState = useCameraStore.getState()
+    const hasSource =
+      cameraState.cameraDevices.length > 0 ||
+      (cameraState.selectedCamera === IP_CAMERA_DEVICE_ID &&
+        Boolean(cameraState.ipCameraUrl?.trim()))
+    const readiness = getScanReadiness(useAttendanceStore.getState(), hasSource)
     if (!readiness.canStart) {
       if (readiness.reason === "no_groups" || readiness.reason === "no_selection") {
         requestGroupSelection()
@@ -359,6 +404,28 @@ export default function Main() {
     void startCamera()
     return true
   }, [requestGroupSelection, startCamera])
+
+  const handleConnectIpCamera = useCallback(
+    async (url: string) => {
+      const result = await cctvService.probeIpStream(url)
+      if (!result.ok || !result.resolved_url) {
+        throw new Error(result.message || "Could not connect to Mobile IP camera.")
+      }
+      setIpCameraUrl(result.resolved_url)
+      setSelectedCamera(IP_CAMERA_DEVICE_ID)
+      setError(null)
+    },
+    [setError, setIpCameraUrl, setSelectedCamera],
+  )
+
+  const handleDisconnectIpCamera = useCallback(() => {
+    setActiveIpStreamUrl?.(null)
+    setIpCameraUrl("")
+    setError(null)
+    const fallbackDevice =
+      cameraDevices.find((d) => d.deviceId && d.deviceId !== IP_CAMERA_DEVICE_ID)?.deviceId ?? ""
+    setSelectedCamera(fallbackDevice)
+  }, [cameraDevices, setActiveIpStreamUrl, setError, setIpCameraUrl, setSelectedCamera])
 
   const syncUpdatedGroupLocally = useCallback(
     (updatedGroup: typeof currentGroup) => {
@@ -690,7 +757,7 @@ export default function Main() {
           activeEl.tagName === "SELECT" ||
           (activeEl as HTMLElement).isContentEditable)
 
-      if (isInput || showSettings || hasBlockingGroupModalOpen) {
+      if (isInput || showSettings || hasBlockingGroupModalOpen || showCctvHub) {
         return
       }
 
@@ -706,7 +773,7 @@ export default function Main() {
 
     window.addEventListener("keydown", handleKeyDown)
     return () => window.removeEventListener("keydown", handleKeyDown)
-  }, [hasBlockingGroupModalOpen, showSettings, startCameraGuarded, stopCamera])
+  }, [hasBlockingGroupModalOpen, showCctvHub, showSettings, startCameraGuarded, stopCamera])
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-[var(--bg-primary)] text-white">
@@ -742,34 +809,90 @@ export default function Main() {
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="relative flex min-h-0 flex-1 items-center justify-center p-3">
-            <VideoCanvas
-              videoRef={videoRef}
-              canvasRef={canvasRef}
-              overlayCanvasRef={overlayCanvasRef}
-              quickSettings={quickSettings}
-              isVideoLoading={isVideoLoading}
+          <div className="relative flex min-h-0 flex-1 flex-col p-3">
+            <CctvStatusHud
               isStreaming={isStreaming}
-              isShellReady={isShellReady}
-              isGroupDataLoading={isGroupDataLoading}
-              dataError={shellBootstrapError || panelDataError}
-              hasSelectedGroup={Boolean(currentGroup)}
-              hasEnrolledFaces={hasEnrolledFaces}
-              hasGroups={attendanceGroups.length > 0}
-              hasMembers={groupMembers.length > 0}
-              lateTrackingEnabled={!!currentGroup?.settings?.late_threshold_enabled}
-              classStartTime={currentGroup?.settings?.class_start_time}
-              onStartTimeChange={handleStartTimeChange}
-              currentGroup={currentGroup}
-              enableSpoofDetection={enableSpoofDetection}
-              maxRecognitionFacesPerFrame={maxRecognitionFacesPerFrame}
+              onOpenHub={handleOpenCctvHub}
+              onOpenVLaser={handleOpenVLaser}
+              viewportMode={viewportMode}
+              onChangeViewportMode={setViewportMode}
             />
 
-            {/* New Cooldown Overlay */}
-            <CooldownOverlay
-              persistentCooldowns={persistentCooldowns}
-              attendanceCooldownSeconds={attendanceCooldownSeconds}
-            />
+            <div className="relative flex min-h-0 flex-1 w-full gap-3 pt-12">
+              {/* Window 1: Original Camera Footage with Biometrics & Overlays */}
+              <div
+                className={`relative min-h-0 h-full overflow-hidden rounded-xl border border-white/10 bg-black/40 transition-all ${
+                  viewportMode === "camera"
+                    ? "flex flex-1 w-full"
+                    : viewportMode === "split"
+                      ? "flex flex-1 w-1/2"
+                      : "hidden"
+                }`}>
+                <div className="pointer-events-none absolute top-2.5 left-3 z-30 flex items-center gap-2 rounded-lg border border-white/10 bg-[#0c1017]/90 px-2.5 py-1 text-[11px] font-semibold text-white/90 shadow-lg backdrop-blur-md">
+                  <span
+                    className={`size-2 rounded-full ${
+                      isStreaming
+                        ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse"
+                        : "bg-white/30"
+                    }`}
+                  />
+                  <span className="tracking-wide">Camera Footage</span>
+                  {selectedCamera?.label && (
+                    <span className="max-w-[140px] truncate text-[10px] text-cyan-300/70 border-l border-white/15 pl-1.5 font-mono">
+                      {selectedCamera.label}
+                    </span>
+                  )}
+                </div>
+
+                <VideoCanvas
+                  videoRef={videoRef}
+                  ipImageRef={ipImageRef}
+                  activeIpStreamUrl={activeIpStreamUrl}
+                  canvasRef={canvasRef}
+                  overlayCanvasRef={overlayCanvasRef}
+                  quickSettings={quickSettings}
+                  isVideoLoading={isVideoLoading}
+                  isStreaming={isStreaming}
+                  isShellReady={isShellReady}
+                  isGroupDataLoading={isGroupDataLoading}
+                  dataError={shellBootstrapError || panelDataError}
+                  hasSelectedGroup={Boolean(currentGroup)}
+                  hasEnrolledFaces={hasEnrolledFaces}
+                  hasGroups={attendanceGroups.length > 0}
+                  hasMembers={groupMembers.length > 0}
+                  lateTrackingEnabled={!!currentGroup?.settings?.late_threshold_enabled}
+                  classStartTime={currentGroup?.settings?.class_start_time}
+                  onStartTimeChange={handleStartTimeChange}
+                  currentGroup={currentGroup}
+                  enableSpoofDetection={enableSpoofDetection}
+                  maxRecognitionFacesPerFrame={maxRecognitionFacesPerFrame}
+                />
+
+                {/* Cooldown Overlay */}
+                <CooldownOverlay
+                  persistentCooldowns={persistentCooldowns}
+                  attendanceCooldownSeconds={attendanceCooldownSeconds}
+                />
+              </div>
+
+              {/* Window 2: V-LASER Spatial Digital Twin & Continuous Movement Tracking */}
+              <div
+                className={`relative min-h-0 h-full overflow-hidden rounded-xl border border-cyan-500/20 bg-[#070d12]/90 shadow-2xl transition-all ${
+                  viewportMode === "vlaser"
+                    ? "flex flex-1 w-full"
+                    : viewportMode === "split"
+                      ? "flex flex-1 w-1/2"
+                      : "hidden"
+                }`}>
+                <VLaserLiveCanvas
+                  cameraId={activeCctvCameraId || "cam-main-1"}
+                  cameraName={selectedCamera?.label || "Live Camera"}
+                  classroom={currentGroup?.name}
+                  isStreaming={isStreaming}
+                  onOpenEditor={handleOpenVLaser}
+                />
+              </div>
+            </div>
           </div>
 
           <ControlBar
@@ -780,6 +903,9 @@ export default function Main() {
             startCamera={startCameraGuarded}
             stopCamera={stopCamera}
             readiness={scanReadiness}
+            ipCameraUrl={ipCameraUrl}
+            onConnectIpCamera={handleConnectIpCamera}
+            onDisconnectIpCamera={handleDisconnectIpCamera}
           />
         </div>
 
@@ -801,6 +927,26 @@ export default function Main() {
         loadAttendanceDataRef={loadAttendanceDataRef}
         streamRef={streamRef}
       />
+
+      <SmartCctvHub
+        isOpen={showCctvHub}
+        initialTab={cctvInitialTab}
+        onClose={() => setShowCctvHub(false)}
+      />
+
+      {showVLaserModal && (
+        <VLaserEditorModal
+          cameraId={activeCctvCameraId || "cam-main-1"}
+          cameraName={
+            activeCctvCameraId ?
+              `CCTV Camera (${activeCctvCameraId})`
+            : "Classroom Main CCTV Camera"
+          }
+          classroom={currentGroup?.name || "Classroom"}
+          isOpen={showVLaserModal}
+          onClose={() => setShowVLaserModal(false)}
+        />
+      )}
     </div>
   )
 }

@@ -73,7 +73,13 @@ export function useBackendService(options: UseBackendServiceOptions) {
     websocketStatus,
     setWebsocketStatus,
   } = useCameraStore()
-  const { setCurrentDetections } = useDetectionStore()
+  const {
+    setCurrentDetections,
+    setImageQuality,
+    setHeadcountSummary,
+    pushCctvAlert,
+    activeCctvCameraId,
+  } = useDetectionStore()
   const { enableSpoofDetection, setPersistentCooldowns } = useAttendanceStore()
   const { setError } = useUIStore()
   const lastSoundAtRef = useRef<Map<string, number>>(new Map())
@@ -95,6 +101,7 @@ export function useBackendService(options: UseBackendServiceOptions) {
       enableLivenessDetection: enableSpoofDetection,
       groupId: currentGroupId,
       maxRecognitionFacesPerFrame,
+      cameraId: activeCctvCameraId || "cam-main-1",
     })
 
     const syncDeviceId = async () => {
@@ -112,7 +119,7 @@ export function useBackendService(options: UseBackendServiceOptions) {
     return () => {
       cancelled = true
     }
-  }, [enableSpoofDetection, currentGroupId, maxRecognitionFacesPerFrame, webSocketServiceRef])
+  }, [enableSpoofDetection, currentGroupId, maxRecognitionFacesPerFrame, activeCctvCameraId, webSocketServiceRef])
 
   const waitForBackendReady = useCallback(
     async (
@@ -191,6 +198,16 @@ export function useBackendService(options: UseBackendServiceOptions) {
     webSocketServiceRef.current.offMessage("connection")
     webSocketServiceRef.current.offMessage("error")
     webSocketServiceRef.current.offMessage("attendance_event")
+    webSocketServiceRef.current.offMessage("cctv_alert")
+
+    webSocketServiceRef.current.onMessage(
+      "cctv_alert",
+      (alert: import("@/components/main/types").CctvAlertMessage) => {
+        if (alert?.message) {
+          pushCctvAlert(alert)
+        }
+      },
+    )
 
     webSocketServiceRef.current.onMessage(
       "attendance_event",
@@ -274,6 +291,13 @@ export function useBackendService(options: UseBackendServiceOptions) {
         // backward after a clock correction and must not stop the frame loop.
         if (typeof data.frame_timestamp === "number" && Number.isFinite(data.frame_timestamp)) {
           lastFrameTimestampRef.current = data.frame_timestamp
+        }
+
+        if (data.image_quality) {
+          setImageQuality(data.image_quality)
+        }
+        if (data.headcount_summary !== undefined) {
+          setHeadcountSummary(data.headcount_summary ?? null)
         }
 
         if (data.faces && Array.isArray(data.faces)) {
@@ -418,6 +442,9 @@ export function useBackendService(options: UseBackendServiceOptions) {
     trackingSessionRef,
     detectionInFlightRef,
     setCurrentDetections,
+    setImageQuality,
+    setHeadcountSummary,
+    pushCctvAlert,
     setWebsocketStatus,
     setError,
     setPersistentCooldowns,

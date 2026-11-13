@@ -72,7 +72,10 @@ def test_client(tmp_path, monkeypatch):
     async def no_op_lifespan(_app):
         yield
 
+    import database.face as database_face
+
     monkeypatch.setattr(database_session, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(database_face, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(app.router, "lifespan_context", no_op_lifespan)
 
     import core.lifespan
